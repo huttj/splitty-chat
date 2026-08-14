@@ -338,11 +338,35 @@ body.dragging-anchor .word { cursor: grabbing; }
   position: fixed; inset: 0; z-index: 100; background: rgba(10, 11, 15, 0.85);
   backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; padding: 24px;
 }
-#name-form { background: var(--panel); border-radius: 18px; padding: 28px; max-width: 360px; width: 100%; text-align: center; }
-#name-form h2 { margin-bottom: 6px; }
-#name-form p { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
-#name-input {
+#gate-card { background: var(--panel); border-radius: 18px; padding: 28px; max-width: 360px; width: 100%; text-align: center; }
+#gate-card h2 { margin-bottom: 6px; }
+#gate-card p { color: var(--muted); font-size: 14px; margin-bottom: 18px; }
+#name-input, #email-input {
   width: 100%; padding: 12px 14px; margin-bottom: 14px; border-radius: 10px;
   border: 1px solid #2e3342; background: var(--bg); color: var(--text); font-size: 16px;
 }
-#name-form .btn-primary { width: 100%; }
+#gate-card .btn-primary { width: 100%; }
+.auth-btn { display: block; text-decoration: none; margin-bottom: 12px; box-sizing: border-box; }
+#auth-note { min-height: 18px; margin-top: 8px; margin-bottom: 0; }
+
+body.hide-gaps .gap { display: none; }
+
+/* admin tabs + user rows */
+#admin-tabs { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+.tab {
+  background: var(--panel); color: var(--muted); border: 1px solid #2a2e3a;
+  border-radius: 9px; padding: 7px 16px; cursor: pointer; font-size: 14px;
+}
+.tab.active { background: var(--accent-soft); color: var(--accent); border-color: var(--accent); }
+#admin-search {
+  flex: 1; padding: 8px 12px; border-radius: 9px; border: 1px solid #2e3342;
+  background: var(--panel); color: var(--text); font-size: 14px; min-width: 0;
+}
+.admin-actions { display: flex; gap: 8px; flex-shrink: 0; }
+.status-pill {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 2px 7px; border-radius: 99px; margin-left: 6px;
+}
+.st-approved { background: rgba(77, 201, 176, 0.18); color: #4dc9b0; }
+.st-pending { background: rgba(255, 209, 102, 0.18); color: var(--new); }
+.st-blocked { background: rgba(255, 77, 94, 0.18); color: var(--rec); }

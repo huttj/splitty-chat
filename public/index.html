@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=29">
+  <link rel="stylesheet" href="/style.css?v=30">
 </head>
 <body>
 
@@ -23,6 +23,7 @@
     <header id="chat-header">
       <a href="/" class="logo">splitty</a>
       <div class="header-actions">
+        <button id="gaps-btn" class="btn-ghost" title="Show or hide pauses in transcripts">Hide pauses</button>
         <button id="name-btn" class="btn-ghost" title="Change your display name"></button>
         <button id="copy-link" class="btn-ghost">Copy invite link</button>
       </div>
@@ -87,20 +88,37 @@
         <input id="admin-pass" type="password" placeholder="Password" autocomplete="current-password">
         <button class="btn-primary">Enter</button>
       </form>
+      <div id="admin-tabs" class="hidden">
+        <button id="tab-chats" class="tab active">Chats</button>
+        <button id="tab-users" class="tab">Users</button>
+        <input id="admin-search" type="search" placeholder="Search by name or email…">
+      </div>
       <div id="admin-list"></div>
     </div>
   </div>
 
-  <!-- name gate -->
+  <!-- name gate / sign in -->
   <div id="name-gate" class="hidden">
-    <form id="name-form">
-      <h2>Who are you?</h2>
-      <p>Pick a name so people know who's talking.</p>
-      <input id="name-input" type="text" maxlength="40" placeholder="Your name" autocomplete="name" required>
-      <button type="submit" class="btn-primary">Join chat</button>
-    </form>
+    <div id="gate-card">
+      <form id="name-form">
+        <h2>Who are you?</h2>
+        <p>Pick a name so people know who's talking.</p>
+        <input id="name-input" type="text" maxlength="40" placeholder="Your name" autocomplete="name" required>
+        <button type="submit" class="btn-primary">Join chat</button>
+      </form>
+      <div id="auth-box" class="hidden">
+        <h2>Sign in to splitty</h2>
+        <p>So your messages follow you everywhere.</p>
+        <a id="google-btn" class="btn-primary auth-btn hidden" href="#">Continue with Google</a>
+        <form id="email-form" class="hidden">
+          <input id="email-input" type="email" placeholder="you@example.com" autocomplete="email" required>
+          <button type="submit" class="btn-primary auth-btn">Email me a sign-in link</button>
+        </form>
+        <p id="auth-note" class="muted"></p>
+      </div>
+    </div>
   </div>
 
-  <script src="/app.js?v=29"></script>
+  <script src="/app.js?v=30"></script>
 </body>
 </html>

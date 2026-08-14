@@ -42,15 +42,26 @@ const standbyEl = () => players[state.activeIdx ^ 1];
 const mediaUrl = msg => `${location.origin}/media/${msg.file}`;
 
 // ---------- boot ----------
+// session first: signed-in users take their account name everywhere
 const chatMatch = location.pathname.match(/^\/c\/([A-Za-z0-9_-]+)/);
-if (chatMatch) {
-  state.chatId = chatMatch[1];
-  initChat();
-} else if (location.pathname === '/admin') {
-  initAdmin();
-} else {
-  initLanding();
-}
+fetch('/api/me')
+  .then(r => r.json())
+  .catch(() => ({ user: null, providers: {}, authEnabled: false }))
+  .then(me => {
+    state.auth = me;
+    if (me.user) {
+      state.name = me.user.name;
+      localStorage.setItem('splitty:name', me.user.name);
+    }
+    if (chatMatch) {
+      state.chatId = chatMatch[1];
+      initChat();
+    } else if (location.pathname === '/admin') {
+      initAdmin();
+    } else {
+      initLanding();
+    }
+  });
 
 // ---------- audio normalization ----------
 // Playback runs through a shared compressor (levels within-clip swings), and each
@@ -209,6 +220,7 @@ function initLanding() {
 }
 
 // ---------- admin ----------
+let adminTab = 'chats';
 function initAdmin() {
   $('#admin').classList.remove('hidden');
   $('#admin-login').onsubmit = e => {
@@ -216,23 +228,72 @@ function initAdmin() {
     sessionStorage.setItem('splitty:admin', $('#admin-pass').value);
     loadAdmin();
   };
+  $('#tab-chats').onclick = () => { adminTab = 'chats'; loadAdmin(); };
+  $('#tab-users').onclick = () => { adminTab = 'users'; loadAdmin(); };
+  $('#admin-search').oninput = () => loadAdmin(true);
   loadAdmin();
 }
 
-async function loadAdmin() {
+let adminCache = { chats: null, users: null };
+async function loadAdmin(fromCache = false) {
   const pass = sessionStorage.getItem('splitty:admin');
   const form = $('#admin-login'), list = $('#admin-list');
   if (!pass) { form.classList.remove('hidden'); return; }
-  const res = await fetch('/api/admin/chats', { headers: { Authorization: `Bearer ${pass}` } });
-  if (!res.ok) {
-    sessionStorage.removeItem('splitty:admin');
-    form.classList.remove('hidden');
-    list.innerHTML = `<p class="muted">${res.status === 401 ? 'Wrong password.' : 'Admin not available.'}</p>`;
-    return;
+  $('#tab-chats').classList.toggle('active', adminTab === 'chats');
+  $('#tab-users').classList.toggle('active', adminTab === 'users');
+  const q = ($('#admin-search').value || '').trim().toLowerCase();
+
+  if (!fromCache || !adminCache[adminTab]) {
+    const res = await fetch(`/api/admin/${adminTab}`, { headers: { Authorization: `Bearer ${pass}` } });
+    if (!res.ok) {
+      sessionStorage.removeItem('splitty:admin');
+      form.classList.remove('hidden');
+      $('#admin-tabs').classList.add('hidden');
+      list.innerHTML = `<p class="muted">${res.status === 401 ? 'Wrong password.' : 'Admin not available.'}</p>`;
+      return;
+    }
+    adminCache[adminTab] = await res.json();
   }
   form.classList.add('hidden');
-  const { chats } = await res.json();
-  list.innerHTML = chats.length ? '' : '<p class="muted">No chats yet.</p>';
+  $('#admin-tabs').classList.remove('hidden');
+
+  if (adminTab === 'users') {
+    const users = (adminCache.users.users || []).filter(u =>
+      !q || u.name.toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q));
+    list.innerHTML = users.length ? '' : '<p class="muted">No users match.</p>';
+    for (const u of users) {
+      const row = document.createElement('div');
+      row.className = 'admin-row';
+      row.innerHTML = `
+        <div class="admin-info">
+          <span><b>${escapeHtml(u.name)}</b> <span class="status-pill st-${u.status}">${u.status}</span></span>
+          <span class="muted">${escapeHtml(u.email || '(no email)')} · ${u.providers.join(' + ') || 'no logins'} ·
+            ${u.messages} msg${u.messages === 1 ? '' : 's'} · joined ${new Date(u.createdAt).toLocaleDateString()}</span>
+        </div>
+        <div class="admin-actions">
+          ${u.status !== 'approved' ? '<button class="btn-ghost act-approve">Approve</button>' : ''}
+          ${u.status !== 'blocked' ? '<button class="btn-danger act-block">Block</button>'
+            : '<button class="btn-ghost act-approve">Unblock</button>'}
+        </div>`;
+      const setStatus = async status => {
+        await fetch(`/api/admin/users/${u.id}`, {
+          method: 'PATCH',
+          headers: { Authorization: `Bearer ${pass}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status }),
+        });
+        adminCache.users = null;
+        loadAdmin();
+      };
+      row.querySelectorAll('.act-approve').forEach(b => (b.onclick = () => setStatus('approved')));
+      row.querySelector('.act-block') && (row.querySelector('.act-block').onclick = () => setStatus('blocked'));
+      list.appendChild(row);
+    }
+    return;
+  }
+
+  const chats = (adminCache.chats.chats || []).filter(c =>
+    !q || c.id.toLowerCase().includes(q) || c.participants.some(p => p.toLowerCase().includes(q)));
+  list.innerHTML = chats.length ? '' : '<p class="muted">No chats match.</p>';
   for (const c of chats) {
     const row = document.createElement('div');
     row.className = 'admin-row';
@@ -268,6 +329,19 @@ function initChat() {
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;
+
+  // hide/show pauses in transcripts (playback still honors them)
+  const applyGaps = () => {
+    const hide = localStorage.getItem('splitty:hidegaps') === '1';
+    document.body.classList.toggle('hide-gaps', hide);
+    $('#gaps-btn').textContent = hide ? 'Show pauses' : 'Hide pauses';
+  };
+  applyGaps();
+  $('#gaps-btn').onclick = () => {
+    localStorage.setItem('splitty:hidegaps',
+      localStorage.getItem('splitty:hidegaps') === '1' ? '' : '1');
+    applyGaps();
+  };
 
   for (const el of players) {
     el.addEventListener('click', () => togglePause());
@@ -407,7 +481,31 @@ function initChat() {
     applyFit();
   };
 
-  // name gate doubles as the change-name dialog (header button reopens it)
+  // gate: sign-in when auth is configured, name-only otherwise
+  const gateAuthMode = state.auth?.authEnabled && !state.auth?.user;
+  $('#name-form').classList.toggle('hidden', gateAuthMode);
+  $('#auth-box').classList.toggle('hidden', !gateAuthMode);
+  if (gateAuthMode) {
+    const next = encodeURIComponent(location.pathname);
+    if (state.auth.providers.google) {
+      $('#google-btn').classList.remove('hidden');
+      $('#google-btn').href = `/auth/google?next=${next}`;
+    }
+    if (state.auth.providers.email) {
+      $('#email-form').classList.remove('hidden');
+      $('#email-form').onsubmit = async e => {
+        e.preventDefault();
+        const res = await fetch('/auth/email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: $('#email-input').value, next: location.pathname }),
+        });
+        $('#auth-note').textContent = (await res.json()).ok
+          ? 'Check your email — the link signs you in here.'
+          : "Couldn't send the email. Try again?";
+      };
+    }
+  }
   $('#name-form').onsubmit = e => {
     e.preventDefault();
     const v = $('#name-input').value.trim();
@@ -421,16 +519,28 @@ function initChat() {
     ensureCam().catch(armCamRetry);
   };
   $('#name-gate').addEventListener('click', e => {
-    if (e.target === $('#name-gate') && state.name) $('#name-gate').classList.add('hidden');
+    if (e.target === $('#name-gate') && state.name && !gateAuthMode) $('#name-gate').classList.add('hidden');
   });
   const openNameGate = () => {
     $('#name-input').value = state.name;
     $('#name-gate').classList.remove('hidden');
-    $('#name-input').focus();
+    if (!gateAuthMode) $('#name-input').focus();
   };
   $('#name-btn').textContent = state.name || 'Set name';
-  $('#name-btn').onclick = openNameGate;
-  if (!state.name) openNameGate();
+  if (state.auth?.user) {
+    // signed in: the header name button signs you out instead of renaming
+    $('#name-btn').title = 'Sign out';
+    $('#name-btn').onclick = () => {
+      if (confirm(`Signed in as ${state.name}. Sign out?`)) {
+        const f = document.createElement('form');
+        f.method = 'POST'; f.action = '/auth/logout';
+        document.body.appendChild(f); f.submit();
+      }
+    };
+  } else {
+    $('#name-btn').onclick = openNameGate;
+  }
+  if (gateAuthMode || !state.name) openNameGate();
   else ensureCam().catch(armCamRetry); // camera warms up immediately so recording is instant
 
   // remember this chat on the landing page
@@ -705,7 +815,7 @@ function focusWordAt(seg, t, cls) {
     i = msg.words.length - 1;
     const lastEnd = msg.words[i].e;
     const gapEl = document.querySelector(`.gap[data-mid="${seg.id}"][data-gi="${msg.words.length}"]`);
-    if (gapEl && t >= lastEnd) {
+    if (gapEl && gapEl.offsetParent !== null && t >= lastEnd) {
       selector = gapEl;
       gi = msg.words.length;
       const dur = msgDur(msg);
@@ -719,7 +829,7 @@ function focusWordAt(seg, t, cls) {
       // inside the pause before word i (i=0 covers leading silence)
       const prevEnd = i > 0 ? msg.words[i - 1].e : 0;
       const gapEl = document.querySelector(`.gap[data-mid="${seg.id}"][data-gi="${i}"]`);
-      if (gapEl) {
+      if (gapEl && gapEl.offsetParent !== null) { // skip when pauses are hidden
         selector = gapEl;
         gi = i;
         f = w.s > prevEnd ? (t - prevEnd) / (w.s - prevEnd) : 0;
@@ -965,16 +1075,23 @@ async function uploadRecording(videoBlob, audioBlob, rec) {
       xhr.open('POST', `/api/chats/${state.chatId}/messages`);
       xhr.upload.onprogress = e =>
         e.lengthComputable && updateHint(`Sending… ${Math.round((e.loaded / e.total) * 100)}%`);
-      xhr.onload = () =>
-        xhr.status < 300 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(`upload ${xhr.status}`));
+      xhr.onload = () => {
+        if (xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
+        let err = {};
+        try { err = JSON.parse(xhr.responseText); } catch {}
+        reject(Object.assign(new Error(err.error || `upload ${xhr.status}`), { code: err.code }));
+      };
       xhr.onerror = () => reject(new Error('network'));
       xhr.send(fd);
     });
     // your own message never shows as "new" to you
     state.seen[message.id] = 10 * 60 * 60 * 1000;
     localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen));
-  } catch {
-    alert('Upload failed — check the server.');
+  } catch (err) {
+    if (err.code === 'pending') showToast('Sent limit reached — an admin needs to approve you before you can send more.');
+    else if (err.code === 'blocked') showToast('Your account is blocked from sending.');
+    else if (err.code === 'auth') { showToast('Sign in to send messages.'); $('#name-gate').classList.remove('hidden'); }
+    else showToast('Upload failed — try again.');
   }
   await poll();
   if (rec.resume) {
