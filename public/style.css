@@ -347,6 +347,20 @@ body.dragging-anchor .word { cursor: grabbing; }
 }
 #gate-card .btn-primary { width: 100%; }
 .auth-btn { display: block; text-decoration: none; margin-bottom: 12px; box-sizing: border-box; }
+/* Google-branded button: white, official G logo */
+#google-btn {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  width: 100%; padding: 12px 20px; border-radius: 12px;
+  background: #fff; color: #1f1f1f; border: 1px solid #dadce0;
+  font-size: 15px; font-weight: 600;
+}
+#google-btn:active { transform: scale(0.98); }
+#google-btn svg { flex-shrink: 0; }
+#auth-or {
+  display: flex; align-items: center; gap: 12px; margin: 14px 0;
+  color: var(--muted); font-size: 13px;
+}
+#auth-or::before, #auth-or::after { content: ''; flex: 1; height: 1px; background: #2a2e3a; }
 #auth-note { min-height: 18px; margin-top: 8px; margin-bottom: 0; }
 
 body.hide-gaps .gap { display: none; }
