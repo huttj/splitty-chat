@@ -233,6 +233,7 @@ function wireAuthBox(next) {
 // ---------- landing ----------
 function initLanding() {
   $('#landing').classList.remove('hidden');
+  if (state.auth?.isAdmin) $('#admin-link').classList.remove('hidden');
   $('#create-chat').onclick = async () => {
     if (state.auth?.authEnabled && !state.auth?.user) {
       wireAuthBox('/');

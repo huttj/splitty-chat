@@ -84,6 +84,12 @@ body {
   background: transparent; color: var(--muted); border: 1px solid #2a2e3a;
   border-radius: 10px; padding: 6px 12px; font-size: 13px; cursor: pointer;
 }
+.btn-outline {
+  display: inline-block; margin-top: 12px; text-decoration: none;
+  background: transparent; color: var(--accent); border: 1px solid var(--accent);
+  border-radius: 12px; padding: 10px 24px; font-size: 15px; font-weight: 600;
+}
+.btn-outline:hover { background: var(--accent-soft); }
 .btn-ghost:hover { color: var(--text); }
 
 /* ---------- chat layout ---------- */
