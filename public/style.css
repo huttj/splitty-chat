@@ -248,8 +248,8 @@ body.dragging-anchor .word { cursor: grabbing; }
 .word { cursor: pointer; border-radius: 4px; padding: 0 1px; }
 .word:hover { background: var(--accent-soft); }
 .word.unseen { background: rgba(255, 209, 102, 0.16); color: var(--new); }
-.word.speaking { background: var(--accent); color: #fff; }
-/* scrubbing: focal glow slides through the word at the interpolated position */
+/* playback + scrubbing: focal glow slides through the word at the interpolated position */
+.word.speaking,
 .word.scrub-focus {
   color: #fff;
   border-radius: 4px;

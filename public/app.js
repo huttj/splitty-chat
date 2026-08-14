@@ -300,11 +300,17 @@ function initChat() {
       previewVirtual(vt);
     }
   });
-  scrubber.addEventListener('change', () => {
+  // pointerup as well as change: a tap that doesn't move the value never fires
+  // 'change', which used to leave the scrubbing flag stuck on
+  const endScrub = () => {
+    if (!state.scrubbing) return;
     state.scrubbing = false;
     clearScrubFocus();
     seekVirtual(Number(scrubber.value));
-  });
+  };
+  scrubber.addEventListener('change', endScrub);
+  scrubber.addEventListener('pointerup', endScrub);
+  scrubber.addEventListener('pointercancel', endScrub);
 
   // tap your corner PiP to shrink/grow it
   if (localStorage.getItem('splitty:pipmini')) $('#video-box').classList.add('pip-mini');
@@ -589,32 +595,57 @@ function segIdxAt(vt) {
   return idx === -1 ? state.playlist.length - 1 : idx;
 }
 
-// while dragging: glow the word under the playhead, with the hotspot positioned
-// proportionally through the word (interpolated from its start/end timestamps)
-function scrubFocus(vt) {
-  clearScrubFocus();
-  if (!state.playlist.length) return;
-  const seg = state.playlist[segIdxAt(vt)];
+// glow the word containing time t in segment seg, hotspot positioned by
+// interpolating within the word's start/end timestamps
+let lastFocus = { key: '', span: null };
+function focusWordAt(seg, t, cls) {
   const msg = state.byId.get(seg.id);
   if (!msg || !msg.words.length) return;
-  const t = seg.start + (vt - seg.vStart);
   let i = msg.words.findIndex(w => t < w.e);
   if (i === -1) i = msg.words.length - 1;
   const w = msg.words[i];
   const f = w.e > w.s ? Math.min(Math.max((t - w.s) / (w.e - w.s), 0), 1) : 0;
-  const span = document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`);
-  if (!span) return;
-  span.classList.add('scrub-focus');
+  const key = `${cls}:${seg.id}:${i}`;
+  let span = lastFocus.key === key && lastFocus.span?.isConnected ? lastFocus.span : null;
+  if (!span) {
+    span = document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`);
+    if (!span) return;
+    document.querySelectorAll(`.word.${cls}`).forEach(el => {
+      el.classList.remove(cls);
+      el.style.removeProperty('--f');
+    });
+    span.classList.add(cls);
+    span.scrollIntoView({ block: 'nearest' });
+    lastFocus = { key, span };
+  }
   span.style.setProperty('--f', `${(f * 100).toFixed(1)}%`);
-  span.scrollIntoView({ block: 'nearest' });
+}
+
+// while dragging the scrubber
+function scrubFocus(vt) {
+  if (!state.playlist.length) return;
+  const seg = state.playlist[segIdxAt(vt)];
+  focusWordAt(seg, seg.start + (vt - seg.vStart), 'scrub-focus');
 }
 
 function clearScrubFocus() {
+  lastFocus = { key: '', span: null };
   document.querySelectorAll('.word.scrub-focus').forEach(el => {
     el.classList.remove('scrub-focus');
     el.style.removeProperty('--f');
   });
 }
+
+// during playback the same glow glides through words at frame rate
+function tickHighlight() {
+  requestAnimationFrame(tickHighlight);
+  if (!state.playing || state.scrubbing || state.playIdx < 0) return;
+  const el = activeEl();
+  if (el.paused) return;
+  const seg = state.playlist[state.playIdx];
+  if (seg) focusWordAt(seg, el.currentTime, 'speaking');
+}
+requestAnimationFrame(tickHighlight);
 
 // show the frame at a virtual time without playing (used while dragging the scrubber)
 function previewVirtual(vt) {
@@ -671,27 +702,19 @@ function onTimeUpdate() {
   // track furthest-played for "new" highlighting
   markSeen(seg.id, Math.floor(t * 1000));
 
-  // highlight the word being spoken, un-highlight passed "unseen" words
-  const msg = state.byId.get(seg.id);
-  clearWordHighlight();
-  if (msg && msg.words.length) {
-    let i = msg.words.findIndex(w => t >= w.s && t < w.e);
-    if (i === -1) i = msg.words.findLastIndex(w => w.s <= t);
-    if (i >= 0) {
-      const span = document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`);
-      if (span) {
-        span.classList.add('speaking');
-        span.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-      }
-    }
-    document.querySelectorAll(`.word.unseen[data-mid="${seg.id}"]`).forEach(el => {
-      if (Number(el.dataset.t) <= t) el.classList.remove('unseen');
-    });
-  }
+  // un-highlight passed "unseen" words (spoken-word glow runs in tickHighlight)
+  document.querySelectorAll(`.word.unseen[data-mid="${seg.id}"]`).forEach(el => {
+    if (Number(el.dataset.t) <= t) el.classList.remove('unseen');
+  });
 }
 
-const clearWordHighlight = () =>
-  document.querySelectorAll('.word.speaking').forEach(el => el.classList.remove('speaking'));
+const clearWordHighlight = () => {
+  lastFocus = { key: '', span: null };
+  document.querySelectorAll('.word.speaking').forEach(el => {
+    el.classList.remove('speaking');
+    el.style.removeProperty('--f');
+  });
+};
 
 // after new data arrives mid-playback, remap our position onto the fresh playlist
 function remapPlayback() {
