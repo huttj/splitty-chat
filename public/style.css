@@ -223,6 +223,10 @@ body {
 
 .msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .author { font-weight: 650; font-size: 14px; }
+.avatar {
+  width: 18px; height: 18px; border-radius: 50%; object-fit: cover;
+  vertical-align: -4px; flex-shrink: 0;
+}
 .time { color: var(--muted); font-size: 12px; }
 .dur { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 .spacer { flex: 1; }

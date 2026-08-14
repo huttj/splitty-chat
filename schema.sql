@@ -45,3 +45,4 @@ CREATE TABLE IF NOT EXISTS login_tokens (
   created_at INTEGER NOT NULL
 );
 -- users/identities/sessions/login_tokens appended; messages.user_id added via ALTER 2026-08-14
+-- users.picture added via ALTER 2026-08-14 (Google profile photo URL)

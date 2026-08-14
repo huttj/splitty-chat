@@ -19,6 +19,7 @@ const state = {
   undo: [],          // anchor moves: { id, prev }
   scrubbing: false,
   cued: false,       // opening cue-up (earliest unheard) done
+  hideGaps: localStorage.getItem('splitty:hidegaps') === '1', // clip silences from playback
   dragging: null,    // { msg, target } while re-anchoring an interjection
   lastRenderKey: '',
 };
@@ -302,28 +303,30 @@ async function loadAdmin(fromCache = false) {
     for (const u of users) {
       const row = document.createElement('div');
       row.className = 'admin-row';
+      // approved: can send · pending: can watch, one message · blocked: can't sign in
+      const actions =
+        u.status === 'approved'
+          ? '<button class="btn-ghost act" data-s="pending">Unapprove</button><button class="btn-danger act" data-s="blocked">Block</button>'
+          : u.status === 'pending'
+            ? '<button class="btn-ghost act" data-s="approved">Approve</button><button class="btn-danger act" data-s="blocked">Block</button>'
+            : '<button class="btn-ghost act" data-s="approved">Approve</button><button class="btn-ghost act" data-s="pending">Unblock</button>';
       row.innerHTML = `
         <div class="admin-info">
-          <span><b>${escapeHtml(u.name)}</b> <span class="status-pill st-${u.status}">${u.status}</span></span>
+          <span>${u.picture ? `<img class="avatar" src="${escapeHtml(u.picture)}" alt="" referrerpolicy="no-referrer">` : ''}
+            <b>${escapeHtml(u.name)}</b> <span class="status-pill st-${u.status}">${u.status}</span></span>
           <span class="muted">${escapeHtml(u.email || '(no email)')} · ${u.providers.join(' + ') || 'no logins'} ·
             ${u.messages} msg${u.messages === 1 ? '' : 's'} · joined ${new Date(u.createdAt).toLocaleDateString()}</span>
         </div>
-        <div class="admin-actions">
-          ${u.status !== 'approved' ? '<button class="btn-ghost act-approve">Approve</button>' : ''}
-          ${u.status !== 'blocked' ? '<button class="btn-danger act-block">Block</button>'
-            : '<button class="btn-ghost act-approve">Unblock</button>'}
-        </div>`;
-      const setStatus = async status => {
+        <div class="admin-actions">${actions}</div>`;
+      row.querySelectorAll('.act').forEach(b => (b.onclick = async () => {
         await fetch(`/api/admin/users/${u.id}`, {
           method: 'PATCH',
           headers: { Authorization: `Bearer ${pass}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
+          body: JSON.stringify({ status: b.dataset.s }),
         });
         adminCache.users = null;
         loadAdmin();
-      };
-      row.querySelectorAll('.act-approve').forEach(b => (b.onclick = () => setStatus('approved')));
-      row.querySelector('.act-block') && (row.querySelector('.act-block').onclick = () => setStatus('blocked'));
+      }));
       list.appendChild(row);
     }
     return;
@@ -368,11 +371,14 @@ function initChat() {
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;
 
-  // hide/show pauses in transcripts (playback still honors them)
+  // hide pauses = clip them: transcript gaps disappear AND playback skips the
+  // silence, so the timeline/timestamps compress to speech-only time
   const applyGaps = () => {
-    const hide = localStorage.getItem('splitty:hidegaps') === '1';
-    document.body.classList.toggle('hide-gaps', hide);
-    $('#gaps-btn').textContent = hide ? 'Show pauses' : 'Hide pauses';
+    state.hideGaps = localStorage.getItem('splitty:hidegaps') === '1';
+    document.body.classList.toggle('hide-gaps', state.hideGaps);
+    $('#gaps-btn').textContent = state.hideGaps ? 'Show pauses' : 'Skip pauses';
+    if (state.playing) remapPlayback();
+    else buildPlaylist();
   };
   applyGaps();
   $('#gaps-btn').onclick = () => {
@@ -652,6 +658,38 @@ function snapAnchor(msg, tSec) {
   return w ? w.e : tSec;
 }
 
+// silence windows (>=0.4s between word timestamps), padded so clips keep a breath
+function silencesFor(msg) {
+  if (!msg.words.length) return [];
+  const sil = [];
+  let prev = 0;
+  const consider = (from, to) => {
+    if (to - from >= 0.4 && to - (from + 0.12) - 0.12 >= 0.15) sil.push([from + 0.12, to - 0.12]);
+  };
+  for (const w of msg.words) {
+    consider(prev, w.s);
+    prev = Math.max(prev, w.e);
+  }
+  consider(prev, msgDur(msg));
+  return sil;
+}
+
+// push [start,end) of msg onto segs — split around silences when skip-pauses is on
+function emitChunks(msg, start, end, segs) {
+  if (end <= start + 0.01) return;
+  if (!state.hideGaps || !msg.words.length) {
+    segs.push({ id: msg.id, start, end });
+    return;
+  }
+  let cur = start;
+  for (const [s, e] of silencesFor(msg)) {
+    if (e <= cur || s >= end) continue;
+    if (Math.max(s, cur) > cur + 0.01) segs.push({ id: msg.id, start: cur, end: Math.max(s, cur) });
+    cur = Math.min(e, end);
+  }
+  if (end > cur + 0.01) segs.push({ id: msg.id, start: cur, end });
+}
+
 // Expand a message into playable segments, interleaving interjections at their anchors.
 function segmentsFor(msg) {
   const dur = msgDur(msg);
@@ -659,11 +697,12 @@ function segmentsFor(msg) {
   let cursor = 0;
   for (const kid of childrenOf(msg.id)) {
     const t = Math.min(snapAnchor(msg, (kid.anchorMs || 0) / 1000), dur);
-    if (t > cursor) segs.push({ id: msg.id, start: cursor, end: t });
+    emitChunks(msg, cursor, t, segs);
     segs.push(...segmentsFor(kid));
     cursor = Math.max(cursor, t);
   }
-  if (cursor < dur || !segs.length) segs.push({ id: msg.id, start: cursor, end: Math.max(dur, cursor) });
+  emitChunks(msg, cursor, Math.max(dur, cursor), segs);
+  if (!segs.length) segs.push({ id: msg.id, start: 0, end: dur }); // never drop a message entirely
   return segs;
 }
 
@@ -1291,6 +1330,7 @@ function renderMessage(msg, depth) {
   const head = document.createElement('div');
   head.className = 'msg-head';
   head.innerHTML = `<button class="play-btn" title="Play from start"><svg class="ic" viewBox="0 0 16 16"><path d="M4.5 2.2 13.5 8l-9 5.8z"/></svg></button>
+    ${msg.picture ? `<img class="avatar" src="${escapeHtml(msg.picture)}" alt="" referrerpolicy="no-referrer">` : ''}
     <span class="author"></span>
     <span class="time">${fmtTime(msg.createdAt)}</span>
     <span class="dur">${fmtClock(msgDur(msg))}</span>
