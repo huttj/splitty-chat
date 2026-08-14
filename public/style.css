@@ -13,7 +13,11 @@
   --radius: 14px;
 }
 
-html, body { height: 100%; }
+html, body {
+  height: 100%;
+  overflow: hidden;              /* the app shell never scrolls — panes scroll inside */
+  overscroll-behavior: none;     /* no pull-to-refresh / rubber-banding on mobile */
+}
 body {
   background: var(--bg);
   color: var(--text);
@@ -26,7 +30,7 @@ body {
 .muted a { color: var(--accent); }
 
 /* ---------- landing ---------- */
-#landing { display: flex; min-height: 100dvh; align-items: center; justify-content: center; padding: 24px; }
+#landing { display: flex; height: 100dvh; overflow-y: auto; align-items: center; justify-content: center; padding: 24px; }
 .landing-inner { max-width: 420px; text-align: center; }
 .landing-inner h1 { font-size: 44px; letter-spacing: -1px; margin-bottom: 8px; }
 .tagline { color: var(--muted); margin-bottom: 28px; }
@@ -51,7 +55,7 @@ body {
 }
 
 /* ---------- admin ---------- */
-#admin { min-height: 100dvh; padding: 32px 20px; }
+#admin { height: 100dvh; overflow-y: auto; padding: 32px 20px; }
 .admin-inner { max-width: 760px; margin: 0 auto; }
 .admin-inner h1 { margin-bottom: 20px; }
 #admin-login { display: flex; gap: 10px; margin-bottom: 20px; }
@@ -90,7 +94,7 @@ body {
 }
 .logo { font-weight: 700; color: var(--text); text-decoration: none; letter-spacing: -0.5px; }
 
-#messages { flex: 1; overflow-y: auto; padding: 16px 16px 120px; } /* room for the floating record button */
+#messages { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 16px 16px 120px; } /* room for the floating record button */
 .empty { color: var(--muted); text-align: center; margin-top: 15vh; }
 
 /* ---------- stage (video + transport) ---------- */
@@ -103,6 +107,7 @@ body {
 #video-box {
   position: relative; width: 100%; height: var(--stageh, 30vh);
   border-radius: 12px; overflow: hidden; background: #000;
+  touch-action: none; /* a missed grab of the divider must not scroll the page */
 }
 #video-box video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 #preview { transform: scaleX(-1); }
@@ -247,6 +252,12 @@ body.dragging-anchor .word { cursor: grabbing; }
 .msg-body { font-size: 16px; }
 .word { cursor: pointer; border-radius: 4px; padding: 0 1px; }
 .word:hover { background: var(--accent-soft); }
+/* silences between words, width scaled to the pause length; tap to play from the pause */
+.gap {
+  display: inline-block; height: 8px; vertical-align: middle;
+  border-bottom: 2px dotted #454b5e; margin: 0 4px 3px; cursor: pointer;
+}
+.gap:hover { border-color: var(--accent); }
 .word.unseen { background: rgba(255, 209, 102, 0.16); color: var(--new); }
 /* playback + scrubbing: steady baseline wash over the whole word,
    with a brighter focal hotspot sliding through at the interpolated position */

@@ -1043,6 +1043,19 @@ function renderMessage(msg, depth) {
     const frag = document.createDocumentFragment();
     while (wi < msg.words.length && (untilSec == null || msg.words[wi].s < untilSec)) {
       const w = msg.words[wi];
+      // render audible silences as widening dotted gaps
+      if (wi > 0) {
+        const prevEnd = msg.words[wi - 1].e;
+        const gapSec = w.s - prevEnd;
+        if (gapSec >= 0.4) {
+          const g = document.createElement('span');
+          g.className = 'gap';
+          g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
+          g.title = `${gapSec.toFixed(1)}s pause`;
+          g.onclick = () => playFrom(msg.id, prevEnd + 0.01);
+          frag.appendChild(g);
+        }
+      }
       const span = document.createElement('span');
       span.className = 'word' + (!mine && w.s * 1000 > seenMs ? ' unseen' : '');
       span.dataset.mid = msg.id;
