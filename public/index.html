@@ -25,10 +25,25 @@
       <button id="copy-link" class="btn-ghost">Copy invite link</button>
     </header>
 
-    <div id="pip" class="hidden">
-      <video id="player" playsinline></video>
-      <video id="preview" playsinline muted class="hidden"></video>
-      <div id="pip-label"></div>
+    <div id="stage" class="hidden">
+      <div id="video-box">
+        <video id="player-a" playsinline></video>
+        <video id="player-b" playsinline class="hidden"></video>
+        <video id="preview" playsinline muted class="hidden"></video>
+        <div id="pip-label"></div>
+      </div>
+      <div id="transport">
+        <div id="scrub-wrap">
+          <div id="ticks"></div>
+          <input id="scrubber" type="range" min="0" max="100" step="0.01" value="0">
+        </div>
+        <div id="transport-row">
+          <button id="btn-back" class="t-btn" title="Back 10s">↺10</button>
+          <button id="btn-play" class="t-btn t-play" title="Play/pause">⏸</button>
+          <button id="btn-fwd" class="t-btn" title="Forward 10s">10↻</button>
+          <span id="time-label">0:00 / 0:00</span>
+        </div>
+      </div>
     </div>
 
     <main id="messages"></main>

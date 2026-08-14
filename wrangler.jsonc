@@ -2,6 +2,7 @@
   "name": "splitty",
   "main": "src/worker.js",
   "compatibility_date": "2026-08-01",
+  "workers_dev": true,
   "routes": [
     { "pattern": "splitty.chat", "custom_domain": true },
     { "pattern": "www.splitty.chat", "custom_domain": true }

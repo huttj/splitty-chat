@@ -54,6 +54,18 @@ export default {
         return await createMessage(request, env, ctx, m[1]);
       }
 
+      // re-anchor an interjection (drag-to-move the split point)
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)$/)) && request.method === 'PATCH') {
+        const row = await env.DB.prepare('SELECT parent_id FROM messages WHERE id = ? AND chat_id = ?')
+          .bind(m[2], m[1]).first();
+        if (!row) return json({ error: 'not found' }, 404);
+        if (!row.parent_id) return json({ error: 'not an interjection' }, 400);
+        const body = await request.json();
+        const anchorMs = Math.max(0, Math.round(Number(body.anchorMs) || 0));
+        await env.DB.prepare('UPDATE messages SET anchor_ms = ? WHERE id = ?').bind(anchorMs, m[2]).run();
+        return json({ ok: true, anchorMs });
+      }
+
       if ((m = pathname.match(/^\/media\/([A-Za-z0-9_.-]+)$/)) && (request.method === 'GET' || request.method === 'HEAD')) {
         return await serveMedia(request, env, m[1]);
       }

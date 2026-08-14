@@ -8,16 +8,22 @@ const state = {
   messages: [],
   byId: new Map(),
   seen: {},          // msgId -> furthest played ms
-  playlist: [],      // flat segments [{id, start, end|null}]
+  playlist: [],      // flat segments [{id, start, end, vStart, vEnd}] on the virtual timeline
+  vDur: 0,
   playIdx: -1,
-  playing: false,
-  pendingSeek: null,
-  rec: null,         // { recorder, stream, startTs, parentId, anchorMs, resume }
+  playing: false,    // a playback session is active (may be paused)
+  activeIdx: 0,      // which of the two <video> elements is live
+  rec: null,         // { recorder, audioRecorder, stream, startTs, parentId, anchorMs, resume }
+  scrubbing: false,
+  dragging: null,    // { msg, target } while re-anchoring an interjection
   lastRenderKey: '',
 };
 
-const player = $('#player');
+const players = [$('#player-a'), $('#player-b')];
 const preview = $('#preview');
+const activeEl = () => players[state.activeIdx];
+const standbyEl = () => players[state.activeIdx ^ 1];
+const mediaUrl = msg => `${location.origin}/media/${msg.file}`;
 
 // ---------- boot ----------
 const chatMatch = location.pathname.match(/^\/c\/([A-Za-z0-9_-]+)/);
@@ -60,15 +66,35 @@ function initChat() {
     setTimeout(() => ($('#copy-link').textContent = 'Copy invite link'), 1500);
   };
   $('#rec-btn').onclick = toggleRecord;
-  player.onclick = () => (player.paused ? player.play() : player.pause());
-  player.addEventListener('timeupdate', onTimeUpdate);
-  player.addEventListener('ended', () => advanceSegment());
-  player.addEventListener('loadedmetadata', () => {
-    if (state.pendingSeek != null) {
-      player.currentTime = state.pendingSeek;
-      state.pendingSeek = null;
-      player.play();
-    }
+
+  for (const el of players) {
+    el.addEventListener('click', () => togglePause());
+    el.addEventListener('timeupdate', e => e.target === activeEl() && onTimeUpdate());
+    el.addEventListener('ended', e => e.target === activeEl() && advanceSegment());
+    el.addEventListener('play', e => e.target === activeEl() && ($('#btn-play').textContent = '⏸'));
+    el.addEventListener('pause', e => e.target === activeEl() && ($('#btn-play').textContent = '▶'));
+    el.addEventListener('loadedmetadata', e => {
+      const v = e.target;
+      if (v._pendingSeek != null) {
+        v.currentTime = v._pendingSeek;
+        v._pendingSeek = null;
+      }
+      if (v._autoplay) {
+        v._autoplay = false;
+        v.play();
+      }
+    });
+  }
+
+  $('#btn-play').onclick = togglePause;
+  $('#btn-back').onclick = () => skip(-10);
+  $('#btn-fwd').onclick = () => skip(10);
+  const scrubber = $('#scrubber');
+  scrubber.addEventListener('pointerdown', () => (state.scrubbing = true));
+  scrubber.addEventListener('input', () => updateTimeLabel(Number(scrubber.value)));
+  scrubber.addEventListener('change', () => {
+    state.scrubbing = false;
+    seekVirtual(Number(scrubber.value));
   });
 
   if (!state.name) {
@@ -111,31 +137,68 @@ const roots = () => state.messages.filter(m => !m.parentId).sort((a, b) => a.cre
 const childrenOf = id =>
   state.messages.filter(m => m.parentId === id).sort((a, b) => (a.anchorMs - b.anchorMs) || (a.createdAt - b.createdAt));
 
+function msgDur(msg) {
+  if (msg.durationMs) return msg.durationMs / 1000;
+  if (msg.words.length) return msg.words[msg.words.length - 1].e + 0.6;
+  return 3;
+}
+
 // Expand a message into playable segments, interleaving interjections at their anchors.
 function segmentsFor(msg) {
+  const dur = msgDur(msg);
   const segs = [];
   let cursor = 0;
   for (const kid of childrenOf(msg.id)) {
-    const t = (kid.anchorMs || 0) / 1000;
+    const t = Math.min((kid.anchorMs || 0) / 1000, dur);
     if (t > cursor) segs.push({ id: msg.id, start: cursor, end: t });
     segs.push(...segmentsFor(kid));
     cursor = Math.max(cursor, t);
   }
-  segs.push({ id: msg.id, start: cursor, end: null });
+  if (cursor < dur || !segs.length) segs.push({ id: msg.id, start: cursor, end: Math.max(dur, cursor) });
   return segs;
 }
 
-const fullPlaylist = () => roots().flatMap(segmentsFor);
+// The virtual timeline: every segment of the whole conversation stacked end to end.
+function buildPlaylist() {
+  const segs = roots().flatMap(segmentsFor);
+  let v = 0;
+  for (const s of segs) {
+    s.vStart = v;
+    v += s.end - s.start;
+    s.vEnd = v;
+  }
+  state.playlist = segs;
+  state.vDur = v;
+  const scrubber = $('#scrubber');
+  scrubber.max = Math.max(v, 0.1);
+  renderTicks();
+}
+
+function renderTicks() {
+  const box = $('#ticks');
+  box.innerHTML = '';
+  if (state.vDur <= 0) return;
+  for (const s of state.playlist.slice(1)) {
+    const t = document.createElement('div');
+    t.className = 'tick';
+    t.style.left = `${(s.vStart / state.vDur) * 100}%`;
+    box.appendChild(t);
+  }
+}
 
 // ---------- playback ----------
 function playFrom(msgId, atSec) {
-  state.playlist = fullPlaylist();
+  buildPlaylist();
   let idx = state.playlist.findIndex(
-    s => s.id === msgId && atSec >= s.start - 0.001 && (s.end == null || atSec < s.end)
+    s => s.id === msgId && atSec >= s.start - 0.001 && atSec < s.end
   );
-  if (idx === -1) idx = state.playlist.findIndex(s => s.id === msgId);
-  if (idx === -1) return;
-  playSegment(idx, atSec);
+  if (idx === -1) {
+    // past the estimated end — take the message's last segment
+    idx = state.playlist.findLastIndex(s => s.id === msgId);
+    if (idx === -1) return;
+    atSec = Math.min(atSec, state.playlist[idx].end - 0.05);
+  }
+  playSegment(idx, Math.max(atSec, state.playlist[idx].start));
 }
 
 function playSegment(idx, offset) {
@@ -144,17 +207,52 @@ function playSegment(idx, offset) {
   if (!msg) return stopPlayback();
   state.playIdx = idx;
   state.playing = true;
-  showPip('play', msg.author);
-  const src = `/media/${msg.file}`;
+  const src = mediaUrl(msg);
   const at = offset != null ? offset : seg.start;
-  if (!player.src.endsWith(src)) {
-    state.pendingSeek = at;
-    player.src = src;
+  const stb = standbyEl();
+
+  if (offset == null && stb._preparedKey === segKey(seg) && stb.readyState >= 2) {
+    // seamless handoff: the standby element is already loaded and parked at seg.start
+    activeEl().pause();
+    state.activeIdx ^= 1;
+    activeEl().play();
   } else {
-    player.currentTime = at;
-    player.play();
+    const el = activeEl();
+    if (el.src === src) {
+      el.currentTime = at;
+      el.play();
+    } else {
+      el._pendingSeek = at;
+      el._autoplay = true;
+      el.src = src;
+    }
   }
+  prepareNext(idx);
+  showStage('play', msg.author);
   updateHint();
+}
+
+const segKey = seg => `${seg.id}@${seg.start.toFixed(3)}`;
+
+// Park the *other* video element on the next segment so the switch is instant.
+function prepareNext(idx) {
+  const nseg = state.playlist[idx + 1];
+  const stb = standbyEl();
+  if (!nseg) { stb._preparedKey = null; return; }
+  const nmsg = state.byId.get(nseg.id);
+  if (!nmsg) return;
+  const key = segKey(nseg);
+  if (stb._preparedKey === key) return;
+  const nsrc = mediaUrl(nmsg);
+  stb._autoplay = false;
+  if (stb.src === nsrc && stb.readyState >= 1) {
+    stb.currentTime = nseg.start;
+  } else {
+    stb._pendingSeek = nseg.start;
+    stb.preload = 'auto';
+    stb.src = nsrc;
+  }
+  stb._preparedKey = key;
 }
 
 function advanceSegment() {
@@ -166,19 +264,55 @@ function advanceSegment() {
 function stopPlayback() {
   state.playing = false;
   state.playIdx = -1;
-  player.pause();
-  hidePip();
+  for (const el of players) { el.pause(); el._preparedKey = null; }
+  hideStage();
   clearWordHighlight();
   updateHint();
+}
+
+function togglePause() {
+  if (!state.playing) return;
+  const el = activeEl();
+  el.paused ? el.play() : el.pause();
+}
+
+function currentVT() {
+  const seg = state.playlist[state.playIdx];
+  if (!seg) return 0;
+  const within = Math.min(Math.max(activeEl().currentTime - seg.start, 0), seg.end - seg.start);
+  return seg.vStart + within;
+}
+
+function seekVirtual(vt) {
+  if (!state.playlist.length) return;
+  vt = Math.min(Math.max(vt, 0), Math.max(state.vDur - 0.05, 0));
+  let idx = state.playlist.findIndex(s => vt < s.vEnd);
+  if (idx === -1) idx = state.playlist.length - 1;
+  const seg = state.playlist[idx];
+  playSegment(idx, seg.start + (vt - seg.vStart));
+}
+
+function skip(delta) {
+  if (state.playing) seekVirtual(currentVT() + delta);
+}
+
+const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+function updateTimeLabel(vt) {
+  $('#time-label').textContent = `${fmtClock(vt)} / ${fmtClock(state.vDur)}`;
 }
 
 let seenSaveTimer = null;
 function onTimeUpdate() {
   if (!state.playing || state.playIdx < 0) return;
   const seg = state.playlist[state.playIdx];
-  const t = player.currentTime;
+  const t = activeEl().currentTime;
 
-  if (seg.end != null && t >= seg.end - 0.05) return advanceSegment();
+  if (t >= seg.end - 0.05) return advanceSegment();
+
+  if (!state.scrubbing) {
+    $('#scrubber').value = currentVT();
+    updateTimeLabel(currentVT());
+  }
 
   // track furthest-played for "new" highlighting
   const ms = Math.floor(t * 1000);
@@ -213,6 +347,20 @@ function onTimeUpdate() {
 const clearWordHighlight = () =>
   document.querySelectorAll('.word.speaking').forEach(el => el.classList.remove('speaking'));
 
+// after new data arrives mid-playback, remap our position onto the fresh playlist
+function remapPlayback() {
+  if (!state.playing || state.playIdx < 0) return;
+  const seg = state.playlist[state.playIdx];
+  const msgId = seg?.id;
+  const t = activeEl().currentTime;
+  buildPlaylist();
+  if (!msgId) return;
+  let idx = state.playlist.findIndex(s => s.id === msgId && t >= s.start - 0.001 && t < s.end);
+  if (idx === -1) idx = state.playlist.findLastIndex(s => s.id === msgId);
+  state.playIdx = idx;
+  if (idx >= 0) prepareNext(idx);
+}
+
 // ---------- recording ----------
 async function toggleRecord() {
   if (state.rec) return stopRecord();
@@ -222,9 +370,9 @@ async function toggleRecord() {
   if (state.playing && state.playIdx >= 0) {
     const seg = state.playlist[state.playIdx];
     parentId = seg.id;
-    anchorMs = Math.floor(player.currentTime * 1000);
-    resume = { msgId: seg.id, atSec: player.currentTime };
-    player.pause();
+    anchorMs = Math.floor(activeEl().currentTime * 1000);
+    resume = { msgId: seg.id, atSec: activeEl().currentTime };
+    activeEl().pause();
   }
 
   let stream;
@@ -271,7 +419,7 @@ async function toggleRecord() {
 
   preview.srcObject = stream;
   preview.play();
-  showPip('record');
+  showStage('record');
   $('#rec-btn').classList.add('recording');
 
   state.rec = { recorder, audioRecorder, stream, startTs: Date.now(), parentId, anchorMs, resume };
@@ -315,7 +463,7 @@ async function uploadRecording(videoBlob, audioBlob, rec) {
   }
   await poll();
   if (rec.resume) playFrom(rec.resume.msgId, rec.resume.atSec);
-  else hidePip();
+  else hideStage();
   updateHint();
 }
 
@@ -335,21 +483,60 @@ function updateHint(text) {
      'Tap record to leave a video note');
 }
 
-// ---------- pip ----------
-function showPip(mode, label = '') {
-  $('#pip').classList.remove('hidden');
-  player.classList.toggle('hidden', mode !== 'play');
-  preview.classList.toggle('hidden', mode !== 'record');
-  $('#pip-label').textContent = mode === 'record' ? '● you' : label;
+// ---------- stage (video area) ----------
+function showStage(mode, label = '') {
+  $('#stage').classList.remove('hidden');
+  const recMode = mode === 'record';
+  preview.classList.toggle('hidden', !recMode);
+  activeEl().classList.toggle('hidden', recMode);
+  standbyEl().classList.add('hidden');
+  $('#transport').classList.toggle('hidden', recMode);
+  $('#pip-label').textContent = recMode ? '● you' : label;
 }
-function hidePip() {
+function hideStage() {
   if (state.rec || state.playing) return;
-  $('#pip').classList.add('hidden');
+  $('#stage').classList.add('hidden');
+}
+
+// ---------- drag an interjection to move its split point ----------
+function startAnchorDrag(e, msg) {
+  e.preventDefault();
+  state.dragging = { msg, target: null };
+  document.body.classList.add('dragging-anchor');
+
+  const setTarget = el => {
+    state.dragging.target?.classList.remove('drop-target');
+    state.dragging.target = el;
+    el?.classList.add('drop-target');
+  };
+  const onMove = ev => {
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    setTarget(el?.classList?.contains('word') && el.dataset.mid === msg.parentId ? el : null);
+  };
+  const onUp = async () => {
+    document.removeEventListener('pointermove', onMove);
+    document.body.classList.remove('dragging-anchor');
+    const target = state.dragging.target;
+    target?.classList.remove('drop-target');
+    state.dragging = null;
+    if (!target) return;
+    const anchorMs = Math.round(Number(target.dataset.t) * 1000);
+    await fetch(`/api/chats/${state.chatId}/messages/${msg.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anchorMs }),
+    });
+    state.lastRenderKey = '';
+    await poll();
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', onUp, { once: true });
 }
 
 // ---------- rendering ----------
 function render() {
-  const key = JSON.stringify(state.messages.map(m => [m.id, m.transcriptStatus, m.words.length]));
+  if (state.dragging) return; // don't rebuild the DOM out from under a drag
+  const key = JSON.stringify(state.messages.map(m => [m.id, m.transcriptStatus, m.words.length, m.anchorMs]));
   if (key === state.lastRenderKey) return;
   state.lastRenderKey = key;
 
@@ -364,6 +551,8 @@ function render() {
 
   for (const msg of roots()) box.appendChild(renderMessage(msg, 0));
   if (nearBottom) box.scrollTop = box.scrollHeight;
+
+  remapPlayback();
 }
 
 function renderMessage(msg, depth) {
@@ -379,8 +568,11 @@ function renderMessage(msg, depth) {
   head.innerHTML = `<button class="play-btn" title="Play from start">▶</button>
     <span class="author">${escapeHtml(msg.author)}</span>
     <span class="time">${fmtTime(msg.createdAt)}</span>
-    ${isNew ? '<span class="badge">new</span>' : ''}`;
+    ${isNew ? '<span class="badge">new</span>' : ''}
+    ${depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}`;
   head.querySelector('.play-btn').onclick = () => playFrom(msg.id, 0);
+  const handle = head.querySelector('.drag-handle');
+  if (handle) handle.addEventListener('pointerdown', e => startAnchorDrag(e, msg));
   card.appendChild(head);
 
   const body = document.createElement('div');
