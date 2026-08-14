@@ -64,6 +64,51 @@ fetch('/api/me')
     }
   });
 
+// ---------- prefetch ----------
+// Quietly pull videos into the browser HTTP cache (media responses are
+// immutable) so tapping any unheard message starts instantly. One download at
+// a time, capped budget, skips Save-Data connections and hidden tabs.
+const prefetch = { done: new Set(), queue: [], running: false, bytes: 0, BUDGET: 80 * 1024 * 1024 };
+
+function enqueuePrefetch(files, front = false) {
+  if (navigator.connection?.saveData) return;
+  const fresh = files.filter(f => f && !prefetch.done.has(f) && !prefetch.queue.includes(f));
+  if (!fresh.length) return;
+  prefetch.queue = front ? [...fresh, ...prefetch.queue] : [...prefetch.queue, ...fresh];
+  runPrefetch();
+}
+
+async function runPrefetch() {
+  if (prefetch.running) return;
+  prefetch.running = true;
+  while (prefetch.queue.length && prefetch.bytes < prefetch.BUDGET) {
+    if (document.hidden) break; // resume on the next enqueue
+    const file = prefetch.queue.shift();
+    if (prefetch.done.has(file)) continue;
+    try {
+      const res = await fetch(`/media/${file}`, { priority: 'low' });
+      if (res.ok) {
+        const buf = await res.blob(); // consuming the body lands it in the HTTP cache
+        prefetch.bytes += buf.size;
+        prefetch.done.add(file);
+      }
+    } catch { /* offline blip — drop it, playback will fetch on demand */ }
+  }
+  prefetch.running = false;
+}
+
+// everything unheard, in the order the conversation would play it
+function prefetchUnheard() {
+  if (!state.playlist.length) buildPlaylist();
+  const files = [];
+  for (const seg of state.playlist) {
+    const msg = state.byId.get(seg.id);
+    if (!msg || isMine(msg.author)) continue;
+    if ((state.seen[msg.id] || 0) < (msg.durationMs || 0) - 500) files.push(msg.file);
+  }
+  enqueuePrefetch([...new Set(files)]);
+}
+
 // ---------- audio normalization ----------
 // Playback runs through a shared compressor (levels within-clip swings), and each
 // message carries a client-measured gain (levels quiet vs loud speakers).
@@ -785,6 +830,11 @@ function playSegment(idx, offset, autoplay = true) {
   players.forEach(p => (p.playbackRate = state.speed));
   setMsgGain(activeEl(), msg); // per-speaker loudness correction
   prepareNext(idx);
+  // jump the next few files to the front of the prefetch queue
+  enqueuePrefetch(
+    state.playlist.slice(idx + 1, idx + 4).map(s => state.byId.get(s.id)?.file),
+    true
+  );
   state.playLabel = msg.author;
   updateStage();
   updateHint();
@@ -1319,6 +1369,7 @@ function render() {
   if (nearBottom) box.scrollTop = box.scrollHeight;
 
   remapPlayback();
+  prefetchUnheard();
 }
 
 function renderMessage(msg, depth) {
