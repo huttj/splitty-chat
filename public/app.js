@@ -257,12 +257,35 @@ function initChat() {
     }
   });
   const scrubber = $('#scrubber');
+  let lastScrubPreview = 0;
   scrubber.addEventListener('pointerdown', () => (state.scrubbing = true));
-  scrubber.addEventListener('input', () => updateTimeLabel(Number(scrubber.value)));
+  scrubber.addEventListener('input', () => {
+    const vt = Number(scrubber.value);
+    updateTimeLabel(vt);
+    // live (throttled) frame preview while dragging
+    const now = performance.now();
+    if (now - lastScrubPreview > 150) {
+      lastScrubPreview = now;
+      previewVirtual(vt);
+    }
+  });
   scrubber.addEventListener('change', () => {
     state.scrubbing = false;
     seekVirtual(Number(scrubber.value));
   });
+
+  // fill (crop to fit) vs fit (letterbox, whole frame visible)
+  const applyFit = () => {
+    $('#video-box').classList.toggle('fit-contain', state.fit === 'contain');
+    $('#fit-btn').textContent = state.fit === 'contain' ? 'Fill' : 'Fit'; // button shows the alternative
+  };
+  state.fit = localStorage.getItem('splitty:fit') || 'cover';
+  applyFit();
+  $('#fit-btn').onclick = () => {
+    state.fit = state.fit === 'cover' ? 'contain' : 'cover';
+    localStorage.setItem('splitty:fit', state.fit);
+    applyFit();
+  };
 
   if (!state.name) {
     $('#name-gate').classList.remove('hidden');
@@ -475,6 +498,31 @@ function skip(delta) {
   if (state.playing) seekVirtual(currentVT() + delta);
 }
 
+// show the frame at a virtual time without playing (used while dragging the scrubber)
+function previewVirtual(vt) {
+  if (!state.playing || !state.playlist.length) return;
+  vt = Math.min(Math.max(vt, 0), Math.max(state.vDur - 0.05, 0));
+  let idx = state.playlist.findIndex(s => vt < s.vEnd);
+  if (idx === -1) idx = state.playlist.length - 1;
+  const seg = state.playlist[idx];
+  const msg = state.byId.get(seg.id);
+  if (!msg) return;
+  const at = seg.start + (vt - seg.vStart);
+  const el = activeEl();
+  const src = mediaUrl(msg);
+  state.playIdx = idx;
+  state.playLabel = msg.author;
+  $('#pip-label').textContent = msg.author;
+  el.pause();
+  if (el.src !== src) {
+    el._pendingSeek = at;
+    el._autoplay = false;
+    el.src = src;
+  } else {
+    el.currentTime = at;
+  }
+}
+
 const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 function updateTimeLabel(vt) {
   $('#time-label').textContent = `${fmtClock(vt)} / ${fmtClock(state.vDur)}`;
@@ -494,15 +542,14 @@ function markSeen(id, ms) {
 
 function onTimeUpdate() {
   if (!state.playing || state.playIdx < 0) return;
+  if (state.scrubbing) return; // paused preview seeks — don't advance or mark seen
   const seg = state.playlist[state.playIdx];
   const t = activeEl().currentTime;
 
   if (t >= seg.end - 0.05) return advanceSegment();
 
-  if (!state.scrubbing) {
-    $('#scrubber').value = currentVT();
-    updateTimeLabel(currentVT());
-  }
+  $('#scrubber').value = currentVT();
+  updateTimeLabel(currentVT());
 
   // track furthest-played for "new" highlighting
   markSeen(seg.id, Math.floor(t * 1000));

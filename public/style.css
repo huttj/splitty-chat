@@ -113,6 +113,16 @@ body {
   box-shadow: 0 4px 14px rgba(0,0,0,0.5);
 }
 #video-box.mode-record { outline: 2px solid var(--rec); outline-offset: -2px; }
+/* fit toggle: contain letterboxes so faces never get cropped away */
+#video-box.fit-contain video { object-fit: contain; }
+#video-box.mode-play.fit-contain #preview { object-fit: cover; } /* corner PiP stays cover */
+#fit-btn {
+  position: absolute; top: 8px; left: 8px; z-index: 4;
+  background: rgba(0, 0, 0, 0.5); border: 0; color: #fff; cursor: pointer;
+  border-radius: 8px; padding: 4px 9px; font-size: 11px; font-weight: 650;
+  backdrop-filter: blur(4px); opacity: 0.75;
+}
+#fit-btn:hover { opacity: 1; }
 /* portrait divider: drag up/down to resize the video */
 #splitter {
   display: block; height: 8px; flex-shrink: 0;
