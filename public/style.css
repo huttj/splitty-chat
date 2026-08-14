@@ -258,6 +258,19 @@ body.dragging-anchor .word { cursor: grabbing; }
   border-bottom: 2px dotted #454b5e; margin: 0 4px 3px; cursor: pointer;
 }
 .gap:hover { border-color: var(--accent); }
+/* the playhead inside a pause: same baseline wash + sliding hotspot as words */
+.gap.speaking,
+.gap.scrub-focus {
+  border-color: transparent;
+  border-radius: 3px;
+  background:
+    linear-gradient(90deg,
+      transparent calc(var(--f, 50%) - 28%),
+      rgba(255, 255, 255, 0.5) var(--f, 50%),
+      transparent calc(var(--f, 50%) + 28%)),
+    rgba(124, 92, 255, 0.5);
+  box-shadow: 0 0 14px rgba(124, 92, 255, 0.5);
+}
 .word.unseen { background: rgba(255, 209, 102, 0.16); color: var(--new); }
 /* playback + scrubbing: steady baseline wash over the whole word,
    with a brighter focal hotspot sliding through at the interpolated position */

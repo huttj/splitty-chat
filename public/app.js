@@ -605,13 +605,28 @@ function focusWordAt(seg, t, cls) {
   let i = msg.words.findIndex(w => t < w.e);
   if (i === -1) i = msg.words.length - 1;
   const w = msg.words[i];
-  const f = w.e > w.s ? Math.min(Math.max((t - w.s) / (w.e - w.s), 0), 1) : 0;
-  const key = `${cls}:${seg.id}:${i}`;
+
+  // inside a pause before word i? glow the gap element to the same standard
+  let selector, f;
+  if (t < w.s && i > 0) {
+    const prevEnd = msg.words[i - 1].e;
+    const gapEl = document.querySelector(`.gap[data-mid="${seg.id}"][data-gi="${i}"]`);
+    if (gapEl) {
+      selector = gapEl;
+      f = w.s > prevEnd ? (t - prevEnd) / (w.s - prevEnd) : 0;
+    }
+  }
+  if (!selector) {
+    f = w.e > w.s ? (t - w.s) / (w.e - w.s) : 0;
+  }
+  f = Math.min(Math.max(f, 0), 1);
+
+  const key = selector ? `${cls}:gap:${seg.id}:${i}` : `${cls}:${seg.id}:${i}`;
   let span = lastFocus.key === key && lastFocus.span?.isConnected ? lastFocus.span : null;
   if (!span) {
-    span = document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`);
+    span = selector || document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`);
     if (!span) return;
-    document.querySelectorAll(`.word.${cls}`).forEach(el => {
+    document.querySelectorAll(`.word.${cls}, .gap.${cls}`).forEach(el => {
       el.classList.remove(cls);
       el.style.removeProperty('--f');
     });
@@ -631,7 +646,7 @@ function scrubFocus(vt) {
 
 function clearScrubFocus() {
   lastFocus = { key: '', span: null };
-  document.querySelectorAll('.word.scrub-focus').forEach(el => {
+  document.querySelectorAll('.word.scrub-focus, .gap.scrub-focus').forEach(el => {
     el.classList.remove('scrub-focus');
     el.style.removeProperty('--f');
   });
@@ -641,8 +656,8 @@ function clearScrubFocus() {
 function tickHighlight() {
   requestAnimationFrame(tickHighlight);
   if (!state.playing || state.scrubbing || state.playIdx < 0) return;
+  // runs while paused too, so the highlight stays parked where you landed
   const el = activeEl();
-  if (el.paused) return;
   const seg = state.playlist[state.playIdx];
   if (seg) focusWordAt(seg, el.currentTime, 'speaking');
 }
@@ -711,7 +726,7 @@ function onTimeUpdate() {
 
 const clearWordHighlight = () => {
   lastFocus = { key: '', span: null };
-  document.querySelectorAll('.word.speaking').forEach(el => {
+  document.querySelectorAll('.word.speaking, .gap.speaking').forEach(el => {
     el.classList.remove('speaking');
     el.style.removeProperty('--f');
   });
@@ -1050,6 +1065,8 @@ function renderMessage(msg, depth) {
         if (gapSec >= 0.4) {
           const g = document.createElement('span');
           g.className = 'gap';
+          g.dataset.mid = msg.id;
+          g.dataset.gi = wi; // the pause before word wi
           g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
           g.title = `${gapSec.toFixed(1)}s pause`;
           g.onclick = () => playFrom(msg.id, prevEnd + 0.01);
