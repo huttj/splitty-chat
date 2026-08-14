@@ -90,7 +90,7 @@ body {
 }
 .logo { font-weight: 700; color: var(--text); text-decoration: none; letter-spacing: -0.5px; }
 
-#messages { flex: 1; overflow-y: auto; padding: 16px 16px 24px; }
+#messages { flex: 1; overflow-y: auto; padding: 16px 16px 120px; } /* room for the floating record button */
 .empty { color: var(--muted); text-align: center; margin-top: 15vh; }
 
 /* ---------- stage (video + transport) ---------- */
@@ -106,12 +106,14 @@ body {
 }
 #video-box video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 #preview { transform: scaleX(-1); }
-/* while someone else plays, your camera shrinks to a corner PiP */
+/* while someone else plays, your camera shrinks to a corner PiP (tap to resize) */
 #video-box.mode-play #preview {
-  inset: 8px 8px auto auto; width: 32%; height: auto; aspect-ratio: 3/4;
+  inset: 8px 8px auto auto; width: 22%; height: auto; aspect-ratio: 3/4;
   border-radius: 10px; border: 1px solid rgba(255,255,255,0.3); z-index: 3;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+  box-shadow: 0 4px 14px rgba(0,0,0,0.5); cursor: pointer;
+  transition: width 0.15s ease;
 }
+#video-box.mode-play.pip-mini #preview { width: 12%; }
 #video-box.mode-record { outline: 2px solid var(--rec); outline-offset: -2px; }
 /* fit toggle: contain letterboxes so faces never get cropped away */
 #video-box.fit-contain video { object-fit: contain; }
@@ -168,7 +170,8 @@ body {
   border-radius: 10px; padding: 8px 14px; font-size: 14px; cursor: pointer; white-space: nowrap;
   display: inline-flex; align-items: center; gap: 5px;
 }
-.ti { font-size: 18px; line-height: 1; }
+.ti { font-size: 15px; line-height: 1; }
+.t-play { font-size: 21px; line-height: 1; min-width: 54px; padding: 6px 14px; justify-content: center; }
 .t-btn:active { transform: scale(0.95); }
 .t-play { font-size: 15px; min-width: 44px; }
 #time-label { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -191,12 +194,10 @@ body {
     grid-column: 2; grid-row: 2 / 4; height: auto;
     cursor: col-resize; background: #22252f;
   }
-  #messages { grid-column: 3; grid-row: 2; }
-  #controls { grid-column: 3; grid-row: 3; }
+  #messages { grid-column: 3; grid-row: 2 / 4; }
   /* no camera + nothing playing: give the chat the full width */
   #stage.hidden ~ #splitter { display: none; }
   #stage.hidden ~ #messages { grid-column: 1 / -1; }
-  #stage.hidden ~ #controls { grid-column: 1 / -1; }
 }
 
 /* ---------- messages ---------- */
@@ -243,16 +244,21 @@ body.dragging-anchor .word { cursor: grabbing; }
 .word.unseen { background: rgba(255, 209, 102, 0.16); color: var(--new); }
 .word.speaking { background: var(--accent); color: #fff; }
 
-/* ---------- controls ---------- */
+/* ---------- controls: floating record button ---------- */
 #controls {
-  flex-shrink: 0; display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 10px 16px calc(14px + env(safe-area-inset-bottom));
-  border-top: 1px solid #22252f;
+  position: fixed; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 60;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
 }
-#rec-hint { font-size: 13px; color: var(--muted); min-height: 20px; }
+#rec-hint {
+  font-size: 12px; color: var(--text); background: var(--panel-2);
+  border: 1px solid #2a2e3a; border-radius: 99px; padding: 6px 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+}
+#rec-hint:empty { display: none; }
 #rec-btn {
-  width: 68px; height: 68px; border-radius: 50%; border: 3px solid #3a3f4e;
+  width: 64px; height: 64px; border-radius: 50%; border: 3px solid #3a3f4e;
   background: var(--panel-2); cursor: pointer; display: grid; place-items: center;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.5);
 }
 .rec-dot { width: 26px; height: 26px; border-radius: 50%; background: var(--rec); transition: all 0.2s; }
 #rec-btn.recording { border-color: var(--rec); animation: pulse 1.4s infinite; }

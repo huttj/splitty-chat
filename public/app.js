@@ -299,6 +299,15 @@ function initChat() {
     seekVirtual(Number(scrubber.value));
   });
 
+  // tap your corner PiP to shrink/grow it
+  if (localStorage.getItem('splitty:pipmini')) $('#video-box').classList.add('pip-mini');
+  preview.addEventListener('click', () => {
+    const box = $('#video-box');
+    if (!box.classList.contains('mode-play')) return;
+    const mini = box.classList.toggle('pip-mini');
+    localStorage.setItem('splitty:pipmini', mini ? '1' : '');
+  });
+
   // fill (crop to fit) vs fit (letterbox, whole frame visible)
   const applyFit = () => {
     $('#video-box').classList.toggle('fit-contain', state.fit === 'contain');
@@ -393,7 +402,7 @@ function cueAt(idx, at) {
   $('#scrubber').value = vt;
   updateTimeLabel(vt);
   $('#btn-play').textContent = '▶';
-  updateHint('Cued up where you left off — hit play');
+  updateHint();
 }
 
 // ---------- message tree ----------
@@ -791,13 +800,9 @@ setInterval(() => {
   }
 }, 250);
 
+// only transient status (recording timer, upload %) — empty hides the pill
 function updateHint(text) {
-  $('#rec-hint').textContent =
-    text ??
-    (state.rec ? '' :
-     state.playing ? 'Tap record to jump in — playback pauses, then picks back up' :
-     camStream ? 'Tap record to leave a video note' :
-     'Turn on your camera to record');
+  $('#rec-hint').textContent = text ?? '';
 }
 
 // ---------- stage (video area) ----------
