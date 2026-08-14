@@ -1,0 +1,15 @@
+{
+  "name": "splitty",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate": "wrangler d1 execute splitty --remote --file schema.sql",
+    "db:migrate:local": "wrangler d1 execute splitty --local --file schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.123.0"
+  }
+}

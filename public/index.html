@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>splitty</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- landing -->
+  <div id="landing" class="hidden">
+    <div class="landing-inner">
+      <h1>splitty</h1>
+      <p class="tagline">Video conversations that happen in the moment — even when you're not.</p>
+      <button id="create-chat" class="btn-primary">Create a chat</button>
+      <div id="recent-chats"></div>
+    </div>
+  </div>
+
+  <!-- chat -->
+  <div id="chat" class="hidden">
+    <header id="chat-header">
+      <a href="/" class="logo">splitty</a>
+      <button id="copy-link" class="btn-ghost">Copy invite link</button>
+    </header>
+
+    <div id="pip" class="hidden">
+      <video id="player" playsinline></video>
+      <video id="preview" playsinline muted class="hidden"></video>
+      <div id="pip-label"></div>
+    </div>
+
+    <main id="messages"></main>
+
+    <footer id="controls">
+      <div id="rec-hint"></div>
+      <button id="rec-btn" aria-label="record">
+        <span class="rec-dot"></span>
+      </button>
+    </footer>
+  </div>
+
+  <!-- name gate -->
+  <div id="name-gate" class="hidden">
+    <form id="name-form">
+      <h2>Who are you?</h2>
+      <p>Pick a name so people know who's talking.</p>
+      <input id="name-input" type="text" maxlength="40" placeholder="Your name" autocomplete="name" required>
+      <button type="submit" class="btn-primary">Join chat</button>
+    </form>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
