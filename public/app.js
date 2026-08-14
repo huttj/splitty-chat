@@ -202,6 +202,7 @@ function initChat() {
     setTimeout(() => ($('#copy-link').textContent = 'Copy invite link'), 1500);
   };
   $('#rec-btn').onclick = toggleRecord;
+  $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
 
   for (const el of players) {
     el.addEventListener('click', () => togglePause());
@@ -813,6 +814,9 @@ function updateStage() {
   const box = $('#video-box');
   const mode = state.rec ? 'record' : state.playing ? 'play'
     : camStream ? 'self' : camError ? 'enable' : 'none';
+  // record button telegraphs what it'll do: splice into the conversation vs new message
+  $('#rec-btn').classList.toggle('splice', mode === 'play');
+  $('#stop-btn').classList.toggle('hidden', mode !== 'play');
   if (mode === 'none') { stage.classList.add('hidden'); return; }
   if (mode === 'enable') {
     // camera not granted yet: keep the stage visible with the enable button
