@@ -167,6 +167,7 @@ function wireAuthBox(next) {
     $('#google-btn').classList.remove('hidden');
     $('#google-btn').href = `/auth/google?next=${encodeURIComponent(next)}`;
   }
+  $('#auth-or').classList.toggle('hidden', !(state.auth.providers.google && state.auth.providers.email));
   if (state.auth.providers.email) {
     $('#email-form').classList.remove('hidden');
     $('#email-form').onsubmit = async e => {
