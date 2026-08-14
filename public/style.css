@@ -35,7 +35,20 @@ body {
 .recent-chat { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 6px; background: var(--panel); border-radius: 10px; color: var(--text); text-decoration: none; font-size: 14px; }
 .recent-chat:hover { background: var(--panel-2); }
 .rc-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-unread { color: var(--new); font-weight: 650; font-size: 12px; flex-shrink: 0; margin-left: auto; }
 .rc-meta { color: var(--muted); flex-shrink: 0; }
+
+/* ---------- toast ---------- */
+#toast {
+  position: fixed; bottom: 110px; left: 50%; transform: translateX(-50%); z-index: 90;
+  display: flex; align-items: center; gap: 12px;
+  background: var(--panel-2); border: 1px solid #2e3342; border-radius: 12px;
+  padding: 10px 16px; font-size: 14px; box-shadow: 0 8px 28px rgba(0,0,0,0.5);
+}
+#toast-btn {
+  background: none; border: 0; color: var(--accent); font-weight: 650;
+  font-size: 14px; cursor: pointer; padding: 0;
+}
 
 /* ---------- admin ---------- */
 #admin { min-height: 100dvh; padding: 32px 20px; }
@@ -81,14 +94,15 @@ body {
 .empty { color: var(--muted); text-align: center; margin-top: 15vh; }
 
 /* ---------- stage (video + transport) ---------- */
-/* portrait / narrow: a compact strip pinned under the header, chat below */
+/* portrait / narrow: full-width video on top (drag the bar below to resize),
+   full-width track under it, chat below */
 #stage {
-  display: flex; gap: 14px; align-items: center;
-  padding: 10px 16px; border-bottom: 1px solid #22252f; flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 10px 16px 12px; border-bottom: 1px solid #22252f; flex-shrink: 0;
 }
 #video-box {
-  position: relative; width: 104px; flex-shrink: 0;
-  aspect-ratio: 3/4; border-radius: 12px; overflow: hidden; background: #000;
+  position: relative; width: 100%; height: var(--stageh, 30vh);
+  border-radius: 12px; overflow: hidden; background: #000;
 }
 #video-box video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 #preview { transform: scaleX(-1); }
@@ -99,7 +113,13 @@ body {
   box-shadow: 0 4px 14px rgba(0,0,0,0.5);
 }
 #video-box.mode-record { outline: 2px solid var(--rec); outline-offset: -2px; }
-#splitter { display: none; }
+/* portrait divider: drag up/down to resize the video */
+#splitter {
+  display: block; height: 8px; flex-shrink: 0;
+  cursor: row-resize; background: #181a21; touch-action: none;
+}
+#splitter:hover, #splitter:active { background: var(--accent); }
+#stage.hidden ~ #splitter { display: none; }
 #pip-label {
   position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px; z-index: 2;
   font-size: 11px; color: #fff; background: linear-gradient(transparent, rgba(0,0,0,0.7));
@@ -108,8 +128,9 @@ body {
 #transport { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
 #scrub-wrap { position: relative; height: 20px; display: flex; align-items: center; }
 #scrubber {
-  width: 100%; appearance: none; -webkit-appearance: none; height: 5px;
-  background: #2a2e3a; border-radius: 99px; outline: none; cursor: pointer; margin: 0;
+  width: 100%; appearance: none; -webkit-appearance: none; height: 20px;
+  background: transparent; outline: none; cursor: pointer; margin: 0;
+  position: relative; z-index: 2;
 }
 #scrubber::-webkit-slider-thumb {
   -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
@@ -119,16 +140,20 @@ body {
   width: 14px; height: 14px; border-radius: 50%;
   background: var(--accent); border: 2px solid #fff; cursor: grab;
 }
-#ticks { position: absolute; inset: 0; pointer-events: none; }
-.tick {
-  position: absolute; top: 4px; bottom: 4px; width: 2px;
-  background: var(--bg); border-radius: 1px; z-index: 1;
+/* the track itself is a speaker-colored map of the conversation */
+#ticks {
+  position: absolute; left: 0; right: 0; top: 50%; height: 6px;
+  transform: translateY(-50%); pointer-events: none;
+  background: #2a2e3a; border-radius: 99px; overflow: hidden;
 }
-#transport-row { display: flex; align-items: center; gap: 8px; }
+.seg { position: absolute; top: 0; bottom: 0; opacity: 0.85; box-shadow: inset -1px 0 0 rgba(0,0,0,0.5); }
+#transport-row { display: flex; align-items: center; gap: 10px; }
 .t-btn {
   background: var(--panel-2); color: var(--text); border: 1px solid #2a2e3a;
-  border-radius: 9px; padding: 5px 10px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  border-radius: 10px; padding: 8px 14px; font-size: 14px; cursor: pointer; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 5px;
 }
+.ti { font-size: 18px; line-height: 1; }
 .t-btn:active { transform: scale(0.95); }
 .t-play { font-size: 15px; min-width: 44px; }
 #time-label { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -144,14 +169,13 @@ body {
     padding: 16px; border-bottom: 0;
   }
   /* video fills the whole pane */
-  #video-box { width: 100%; max-width: none; margin: 0; flex: 1; min-height: 0; aspect-ratio: auto; }
+  #video-box { width: 100%; height: auto; margin: 0; flex: 1; min-height: 0; }
   #transport { flex: 0 0 auto; margin-top: 12px; }
   #pip-label { font-size: 13px; padding: 6px 12px; }
   #splitter {
-    display: block; grid-column: 2; grid-row: 2 / 4;
-    cursor: col-resize; background: #22252f; touch-action: none;
+    grid-column: 2; grid-row: 2 / 4; height: auto;
+    cursor: col-resize; background: #22252f;
   }
-  #splitter:hover, #splitter:active { background: var(--accent); }
   #messages { grid-column: 3; grid-row: 2; }
   #controls { grid-column: 3; grid-row: 3; }
   /* no camera + nothing playing: give the chat the full width */
@@ -161,17 +185,24 @@ body {
 }
 
 /* ---------- messages ---------- */
-.msg { background: var(--panel); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px; border: 1px solid transparent; }
+.msg {
+  background: var(--panel); border-radius: var(--radius); padding: 12px 14px;
+  margin-bottom: 14px; border: 1px solid transparent;
+  border-left: 3px solid transparent; /* per-speaker color set inline */
+}
 .msg .msg { margin: 10px 0; background: var(--panel-2); }   /* interjections nest inline */
-.msg.depth-1 { border-left: 3px solid var(--accent); }
-.msg.depth-2 { border-left: 3px solid #4dc9b0; }
-.msg.depth-3, .msg.depth-4 { border-left: 3px solid #e08bff; }
-.msg.is-new { border-color: rgba(255, 209, 102, 0.35); }
+.msg.is-new { border-top-color: rgba(255, 209, 102, 0.35); border-right-color: rgba(255, 209, 102, 0.35); border-bottom-color: rgba(255, 209, 102, 0.35); }
 
 .msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .author { font-weight: 650; font-size: 14px; }
-.msg.mine .author { color: var(--accent); }
 .time { color: var(--muted); font-size: 12px; }
+.dur { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.spacer { flex: 1; }
+.del-btn {
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  font-size: 13px; padding: 2px 6px; border-radius: 6px;
+}
+.del-btn:hover { color: var(--rec); background: rgba(255, 77, 94, 0.12); }
 .badge {
   background: var(--new); color: #201a00; font-size: 10px; font-weight: 700;
   padding: 2px 7px; border-radius: 99px; text-transform: uppercase; letter-spacing: 0.5px;

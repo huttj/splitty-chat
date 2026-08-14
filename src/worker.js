@@ -48,14 +48,15 @@ export default {
           const chat = await env.DB.prepare('SELECT id FROM chats WHERE id = ?').bind(id).first();
           if (!chat) { out.push({ id, exists: false }); continue; }
           const { results } = await env.DB
-            .prepare('SELECT author, COUNT(*) AS n, MAX(created_at) AS last FROM messages WHERE chat_id = ? GROUP BY author')
+            .prepare('SELECT id, author, duration_ms, created_at FROM messages WHERE chat_id = ?')
             .bind(id).all();
           out.push({
             id,
             exists: true,
-            participants: results.map(r => r.author),
-            count: results.reduce((a, r) => a + r.n, 0),
-            lastActivity: results.reduce((a, r) => Math.max(a, r.last || 0), 0) || null,
+            participants: [...new Set(results.map(r => r.author))],
+            count: results.length,
+            lastActivity: results.reduce((a, r) => Math.max(a, r.created_at), 0) || null,
+            messages: results.map(r => ({ id: r.id, author: r.author, durationMs: r.duration_ms })),
           });
         }
         return json({ chats: out });
@@ -118,16 +119,37 @@ export default {
         return await createMessage(request, env, ctx, m[1]);
       }
 
-      // re-anchor an interjection (drag-to-move the split point)
+      // re-anchor an interjection (drag-to-move the split point) — author only
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)$/)) && request.method === 'PATCH') {
-        const row = await env.DB.prepare('SELECT parent_id FROM messages WHERE id = ? AND chat_id = ?')
+        const row = await env.DB.prepare('SELECT parent_id, author FROM messages WHERE id = ? AND chat_id = ?')
           .bind(m[2], m[1]).first();
         if (!row) return json({ error: 'not found' }, 404);
         if (!row.parent_id) return json({ error: 'not an interjection' }, 400);
         const body = await request.json();
+        if (body.author !== row.author) return json({ error: 'only the author can move this' }, 403);
         const anchorMs = Math.max(0, Math.round(Number(body.anchorMs) || 0));
         await env.DB.prepare('UPDATE messages SET anchor_ms = ? WHERE id = ?').bind(anchorMs, m[2]).run();
         return json({ ok: true, anchorMs });
+      }
+
+      // delete own message; its interjections fall onto its spot in the parent
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
+        const row = await env.DB
+          .prepare('SELECT author, parent_id, anchor_ms, video_key FROM messages WHERE id = ? AND chat_id = ?')
+          .bind(m[2], m[1]).first();
+        if (!row) return json({ error: 'not found' }, 404);
+        const body = await request.json();
+        if (body.author !== row.author) return json({ error: 'only the author can delete this' }, 403);
+        if (row.parent_id) {
+          await env.DB.prepare('UPDATE messages SET parent_id = ?, anchor_ms = ? WHERE parent_id = ?')
+            .bind(row.parent_id, row.anchor_ms, m[2]).run();
+        } else {
+          await env.DB.prepare('UPDATE messages SET parent_id = NULL, anchor_ms = NULL WHERE parent_id = ?')
+            .bind(m[2]).run();
+        }
+        await env.MEDIA.delete(row.video_key);
+        await env.DB.prepare('DELETE FROM messages WHERE id = ?').bind(m[2]).run();
+        return json({ ok: true });
       }
 
       if ((m = pathname.match(/^\/media\/([A-Za-z0-9_.-]+)$/)) && (request.method === 'GET' || request.method === 'HEAD')) {

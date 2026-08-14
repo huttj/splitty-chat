@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/style.css?v=9">
 </head>
 <body>
 
@@ -38,9 +38,9 @@
           <input id="scrubber" type="range" min="0" max="100" step="0.01" value="0">
         </div>
         <div id="transport-row">
-          <button id="btn-back" class="t-btn" title="Back 10s">↺10</button>
+          <button id="btn-back" class="t-btn" title="Back 10s"><span class="ti">↺</span>10s</button>
           <button id="btn-play" class="t-btn t-play" title="Play/pause">⏸</button>
-          <button id="btn-fwd" class="t-btn" title="Forward 10s">10↻</button>
+          <button id="btn-fwd" class="t-btn" title="Forward 10s">10s<span class="ti">↻</span></button>
           <button id="btn-speed" class="t-btn" title="Playback speed">1×</button>
           <span id="time-label">0:00 / 0:00</span>
         </div>
@@ -50,6 +50,11 @@
     <div id="splitter"></div>
 
     <main id="messages"></main>
+
+    <div id="toast" class="hidden">
+      <span id="toast-msg"></span>
+      <button id="toast-btn" class="hidden">Undo</button>
+    </div>
 
     <footer id="controls">
       <div id="rec-hint"></div>
@@ -81,6 +86,6 @@
     </form>
   </div>
 
-  <script src="/app.js"></script>
+  <script src="/app.js?v=9"></script>
 </body>
 </html>

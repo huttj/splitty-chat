@@ -15,11 +15,19 @@ const state = {
   playLabel: '',     // author of what's on screen
   activeIdx: 0,      // which of the two <video> elements is live
   speed: 1,
-  rec: null,         // { recorder, audioRecorder, stream, startTs, parentId, anchorMs, resume }
+  rec: null,         // { recorder, audioRecorder, startTs, parentId, anchorMs, resume, discard }
+  undo: [],          // anchor moves: { id, prev }
   scrubbing: false,
   dragging: null,    // { msg, target } while re-anchoring an interjection
   lastRenderKey: '',
 };
+
+const USER_COLORS = ['#7c5cff', '#4dc9b0', '#e08bff', '#ffa94d', '#5db3ff', '#ff6b9d', '#9ee36b', '#ffd166'];
+function colorFor(name) {
+  let h = 0;
+  for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return USER_COLORS[h % USER_COLORS.length];
+}
 
 const players = [$('#player-a'), $('#player-b')];
 const preview = $('#preview');
@@ -68,7 +76,7 @@ function initLanding() {
     const a = document.createElement('a');
     a.href = `/c/${r.id}`;
     a.className = 'recent-chat';
-    a.innerHTML = `<span class="rc-names">…</span><span class="rc-meta">${new Date(r.ts).toLocaleDateString()}</span>`;
+    a.innerHTML = `<span class="rc-names">…</span><span class="rc-unread"></span><span class="rc-meta">${new Date(r.ts).toLocaleDateString()}</span>`;
     box.appendChild(a);
     rows.set(r.id, a);
   }
@@ -89,6 +97,18 @@ function initLanding() {
         row.querySelector('.rc-names').textContent =
           others.length ? `with ${others.join(', ')}` : c.count ? 'just you so far' : 'empty chat';
         row.querySelector('.rc-meta').textContent = `${c.count} note${c.count === 1 ? '' : 's'}`;
+        // unread minutes, from this browser's listened-to positions
+        const seen = JSON.parse(localStorage.getItem(`splitty:seen:${c.id}`) || '{}');
+        let unreadMs = 0;
+        for (const msg of c.messages || []) {
+          if (msg.author === state.name) continue;
+          const dur = msg.durationMs || 0;
+          const remaining = dur - Math.min(seen[msg.id] || 0, dur);
+          if (remaining > 1000) unreadMs += remaining;
+        }
+        row.querySelector('.rc-unread').textContent =
+          unreadMs >= 60000 ? `${Math.round(unreadMs / 60000)} min new`
+          : unreadMs > 0 ? '<1 min new' : '';
       }
       if (gone.length) {
         const kept = JSON.parse(localStorage.getItem('splitty:recent') || '[]')
@@ -162,6 +182,12 @@ function initChat() {
     el.addEventListener('click', () => togglePause());
     el.addEventListener('timeupdate', e => e.target === activeEl() && onTimeUpdate());
     el.addEventListener('ended', e => e.target === activeEl() && advanceSegment());
+    el.addEventListener('error', e => {
+      if (state.playing && e.target === activeEl()) {
+        showToast("Couldn't play that one — skipping");
+        advanceSegment();
+      }
+    });
     el.addEventListener('play', e => e.target === activeEl() && ($('#btn-play').textContent = '⏸'));
     el.addEventListener('pause', e => e.target === activeEl() && ($('#btn-play').textContent = '▶'));
     el.addEventListener('loadedmetadata', e => {
@@ -195,22 +221,40 @@ function initChat() {
     speedBtn.textContent = `${state.speed}×`;
   };
 
-  // draggable split between video pane and chat (wide layout)
+  // draggable divider: side-by-side on wide screens, video height on portrait
   const chatEl = $('#chat');
   const savedSplit = localStorage.getItem('splitty:split');
   if (savedSplit) chatEl.style.setProperty('--split', savedSplit);
+  const savedStageH = localStorage.getItem('splitty:stageh');
+  if (savedStageH) chatEl.style.setProperty('--stageh', savedStageH);
   $('#splitter').addEventListener('pointerdown', e => {
     e.preventDefault();
+    const wide = window.matchMedia('(min-width: 880px)').matches;
     const onMove = ev => {
-      const px = Math.min(Math.max(ev.clientX, 280), window.innerWidth - 380);
-      chatEl.style.setProperty('--split', `${px}px`);
+      if (wide) {
+        const px = Math.min(Math.max(ev.clientX, 280), window.innerWidth - 380);
+        chatEl.style.setProperty('--split', `${px}px`);
+      } else {
+        const top = $('#stage').getBoundingClientRect().top;
+        const h = Math.min(Math.max(ev.clientY - top - 16, 120), window.innerHeight * 0.7);
+        chatEl.style.setProperty('--stageh', `${h}px`);
+      }
     };
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
       localStorage.setItem('splitty:split', chatEl.style.getPropertyValue('--split'));
+      localStorage.setItem('splitty:stageh', chatEl.style.getPropertyValue('--stageh'));
     };
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp, { once: true });
+  });
+
+  // undo anchor moves with cmd/ctrl+Z
+  document.addEventListener('keydown', e => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
+      e.preventDefault();
+      undoLast();
+    }
   });
   const scrubber = $('#scrubber');
   scrubber.addEventListener('pointerdown', () => (state.scrubbing = true));
@@ -301,15 +345,19 @@ function buildPlaylist() {
   renderTicks();
 }
 
+// the seek track is a map of the conversation, color-coded by speaker
 function renderTicks() {
   const box = $('#ticks');
   box.innerHTML = '';
   if (state.vDur <= 0) return;
-  for (const s of state.playlist.slice(1)) {
-    const t = document.createElement('div');
-    t.className = 'tick';
-    t.style.left = `${(s.vStart / state.vDur) * 100}%`;
-    box.appendChild(t);
+  for (const s of state.playlist) {
+    const msg = state.byId.get(s.id);
+    const seg = document.createElement('div');
+    seg.className = 'seg';
+    seg.style.left = `${(s.vStart / state.vDur) * 100}%`;
+    seg.style.width = `${((s.vEnd - s.vStart) / state.vDur) * 100}%`;
+    seg.style.background = msg ? colorFor(msg.author) : '#2a2e3a';
+    box.appendChild(seg);
   }
 }
 
@@ -386,6 +434,8 @@ function prepareNext(idx) {
 
 function advanceSegment() {
   if (!state.playing) return;
+  const cur = state.playlist[state.playIdx];
+  if (cur) markSeen(cur.id, Math.ceil(cur.end * 1000)); // finished segments count as fully heard
   if (state.playIdx + 1 < state.playlist.length) playSegment(state.playIdx + 1);
   else stopPlayback();
 }
@@ -431,6 +481,17 @@ function updateTimeLabel(vt) {
 }
 
 let seenSaveTimer = null;
+function markSeen(id, ms) {
+  if (ms > (state.seen[id] || 0)) {
+    state.seen[id] = ms;
+    clearTimeout(seenSaveTimer);
+    seenSaveTimer = setTimeout(
+      () => localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen)),
+      500
+    );
+  }
+}
+
 function onTimeUpdate() {
   if (!state.playing || state.playIdx < 0) return;
   const seg = state.playlist[state.playIdx];
@@ -444,15 +505,7 @@ function onTimeUpdate() {
   }
 
   // track furthest-played for "new" highlighting
-  const ms = Math.floor(t * 1000);
-  if (ms > (state.seen[seg.id] || 0)) {
-    state.seen[seg.id] = ms;
-    clearTimeout(seenSaveTimer);
-    seenSaveTimer = setTimeout(
-      () => localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen)),
-      500
-    );
-  }
+  markSeen(seg.id, Math.floor(t * 1000));
 
   // highlight the word being spoken, un-highlight passed "unseen" words
   const msg = state.byId.get(seg.id);
@@ -522,8 +575,12 @@ async function toggleRecord() {
   const audioMime = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm']
     .find(m => MediaRecorder.isTypeSupported(m)) || '';
 
-  // record video + a small audio-only track (the audio is what gets transcribed)
-  const recorder = new MediaRecorder(stream, videoMime ? { mimeType: videoMime } : {});
+  // record video + a small audio-only track (the audio is what gets transcribed);
+  // capped bitrate keeps uploads fast
+  const recorder = new MediaRecorder(stream, {
+    ...(videoMime && { mimeType: videoMime }),
+    videoBitsPerSecond: 1_500_000,
+  });
   const audioRecorder = new MediaRecorder(
     new MediaStream(stream.getAudioTracks()),
     { ...(audioMime && { mimeType: audioMime }), audioBitsPerSecond: 64000 }
@@ -534,10 +591,20 @@ async function toggleRecord() {
   let stoppedCount = 0;
   const onStop = () => {
     if (++stoppedCount < 2) return;
+    const rec = state.rec;
+    state.rec = null;
+    if (rec.discard) {
+      // accidental tap — 79ms videos help nobody
+      showToast('Too short — tap record, talk, then tap again to send');
+      updateStage();
+      updateHint();
+      if (rec.resume) playFrom(rec.resume.msgId, rec.resume.atSec);
+      return;
+    }
     uploadRecording(
       new Blob(vChunks, { type: recorder.mimeType }),
       new Blob(aChunks, { type: audioRecorder.mimeType }),
-      state.rec
+      rec
     );
   };
   recorder.onstop = onStop;
@@ -555,6 +622,7 @@ async function toggleRecord() {
 function stopRecord() {
   const rec = state.rec;
   if (!rec) return;
+  if (Date.now() - rec.startTs < 700) rec.discard = true;
   rec.recorder.stop(); // uploadRecording fires once both recorders stop
   rec.audioRecorder.stop();
   // the camera stream stays live — it's the always-on preview
@@ -576,8 +644,16 @@ async function uploadRecording(videoBlob, audioBlob, rec) {
     fd.append('anchorMs', String(rec.anchorMs));
   }
   try {
-    const res = await fetch(`/api/chats/${state.chatId}/messages`, { method: 'POST', body: fd });
-    const { message } = await res.json();
+    const { message } = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', `/api/chats/${state.chatId}/messages`);
+      xhr.upload.onprogress = e =>
+        e.lengthComputable && updateHint(`Sending… ${Math.round((e.loaded / e.total) * 100)}%`);
+      xhr.onload = () =>
+        xhr.status < 300 ? resolve(JSON.parse(xhr.responseText)) : reject(new Error(`upload ${xhr.status}`));
+      xhr.onerror = () => reject(new Error('network'));
+      xhr.send(fd);
+    });
     // your own message never shows as "new" to you
     state.seen[message.id] = 10 * 60 * 60 * 1000;
     localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen));
@@ -625,6 +701,38 @@ function updateStage() {
     mode === 'record' ? '● you' : mode === 'play' ? state.playLabel : 'you';
 }
 
+// ---------- toast + undo ----------
+let toastTimer = null;
+function showToast(msg, btnLabel, onClick) {
+  $('#toast-msg').textContent = msg;
+  const b = $('#toast-btn');
+  b.classList.toggle('hidden', !btnLabel);
+  if (btnLabel) {
+    b.textContent = btnLabel;
+    b.onclick = () => { $('#toast').classList.add('hidden'); onClick(); };
+  }
+  $('#toast').classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('#toast').classList.add('hidden'), 6000);
+}
+
+async function patchAnchor(msgId, anchorMs) {
+  const res = await fetch(`/api/chats/${state.chatId}/messages/${msgId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ anchorMs, author: state.name }),
+  });
+  state.lastRenderKey = '';
+  await poll();
+  return res.ok;
+}
+
+function undoLast() {
+  const u = state.undo.pop();
+  if (!u) return;
+  patchAnchor(u.id, u.prev).then(ok => ok && showToast('Move undone'));
+}
+
 // ---------- drag an interjection to move its split point ----------
 function startAnchorDrag(e, msg) {
   e.preventDefault();
@@ -647,14 +755,13 @@ function startAnchorDrag(e, msg) {
     target?.classList.remove('drop-target');
     state.dragging = null;
     if (!target) return;
+    const prev = msg.anchorMs;
     const anchorMs = Math.round(Number(target.dataset.t) * 1000);
-    await fetch(`/api/chats/${state.chatId}/messages/${msg.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anchorMs }),
-    });
-    state.lastRenderKey = '';
-    await poll();
+    if (anchorMs === prev) return;
+    if (await patchAnchor(msg.id, anchorMs)) {
+      state.undo.push({ id: msg.id, prev });
+      showToast('Moved', 'Undo', undoLast);
+    }
   };
   document.addEventListener('pointermove', onMove);
   document.addEventListener('pointerup', onUp, { once: true });
@@ -688,18 +795,37 @@ function renderMessage(msg, depth) {
   const isNew = !mine && (msg.words.length ? msg.words.some(w => w.s * 1000 > seenMs) : seenMs === 0);
 
   const card = document.createElement('div');
-  card.className = `msg depth-${Math.min(depth, 4)}${isNew ? ' is-new' : ''}${mine ? ' mine' : ''}`;
+  card.className = `msg${isNew ? ' is-new' : ''}${mine ? ' mine' : ''}`;
+  card.style.borderLeftColor = colorFor(msg.author); // color-coded by speaker
 
   const head = document.createElement('div');
   head.className = 'msg-head';
   head.innerHTML = `<button class="play-btn" title="Play from start">▶</button>
-    <span class="author">${escapeHtml(msg.author)}</span>
+    <span class="author"></span>
     <span class="time">${fmtTime(msg.createdAt)}</span>
+    <span class="dur">${fmtClock(msgDur(msg))}</span>
     ${isNew ? '<span class="badge">new</span>' : ''}
-    ${depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}`;
+    <span class="spacer"></span>
+    ${mine && depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}
+    ${mine ? '<button class="del-btn" title="Delete this message">✕</button>' : ''}`;
+  const authorEl = head.querySelector('.author');
+  authorEl.textContent = msg.author;
+  authorEl.style.color = colorFor(msg.author);
   head.querySelector('.play-btn').onclick = () => playFrom(msg.id, 0);
   const handle = head.querySelector('.drag-handle');
   if (handle) handle.addEventListener('pointerdown', e => startAnchorDrag(e, msg));
+  const delBtn = head.querySelector('.del-btn');
+  if (delBtn) delBtn.onclick = async () => {
+    if (!confirm('Delete this message for everyone? Replies to it will attach where it was.')) return;
+    await fetch(`/api/chats/${state.chatId}/messages/${msg.id}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ author: state.name }),
+    });
+    if (state.playing) stopPlayback();
+    state.lastRenderKey = '';
+    await poll();
+  };
   card.appendChild(head);
 
   const body = document.createElement('div');
