@@ -307,11 +307,16 @@ function initLanding() {
 let adminTab = 'chats';
 function initAdmin() {
   $('#admin').classList.remove('hidden');
-  $('#admin-login').onsubmit = e => {
-    e.preventDefault();
-    sessionStorage.setItem('splitty:admin', $('#admin-pass').value);
-    loadAdmin();
-  };
+  if (!state.auth?.isAdmin) {
+    $('#admin-denied').classList.remove('hidden');
+    if (state.auth?.user) {
+      $('#admin-denied-msg').textContent = `Signed in as ${state.auth.user.name}, but this account isn't an admin.`;
+    } else {
+      $('#admin-denied-msg').textContent = 'Admins only — sign in to continue.';
+      $('#admin-signin').classList.remove('hidden');
+    }
+    return;
+  }
   $('#tab-chats').onclick = () => { adminTab = 'chats'; loadAdmin(); };
   $('#tab-users').onclick = () => { adminTab = 'users'; loadAdmin(); };
   $('#admin-search').oninput = () => loadAdmin(true);
@@ -320,25 +325,20 @@ function initAdmin() {
 
 let adminCache = { chats: null, users: null };
 async function loadAdmin(fromCache = false) {
-  const pass = sessionStorage.getItem('splitty:admin');
-  const form = $('#admin-login'), list = $('#admin-list');
-  if (!pass) { form.classList.remove('hidden'); return; }
+  const list = $('#admin-list');
   $('#tab-chats').classList.toggle('active', adminTab === 'chats');
   $('#tab-users').classList.toggle('active', adminTab === 'users');
   const q = ($('#admin-search').value || '').trim().toLowerCase();
 
   if (!fromCache || !adminCache[adminTab]) {
-    const res = await fetch(`/api/admin/${adminTab}`, { headers: { Authorization: `Bearer ${pass}` } });
+    const res = await fetch(`/api/admin/${adminTab}`); // session cookie is the credential
     if (!res.ok) {
-      sessionStorage.removeItem('splitty:admin');
-      form.classList.remove('hidden');
       $('#admin-tabs').classList.add('hidden');
-      list.innerHTML = `<p class="muted">${res.status === 401 ? 'Wrong password.' : 'Admin not available.'}</p>`;
+      list.innerHTML = '<p class="muted">Admin access denied.</p>';
       return;
     }
     adminCache[adminTab] = await res.json();
   }
-  form.classList.add('hidden');
   $('#admin-tabs').classList.remove('hidden');
 
   if (adminTab === 'users') {
@@ -366,7 +366,7 @@ async function loadAdmin(fromCache = false) {
       row.querySelectorAll('.act').forEach(b => (b.onclick = async () => {
         await fetch(`/api/admin/users/${u.id}`, {
           method: 'PATCH',
-          headers: { Authorization: `Bearer ${pass}`, 'Content-Type': 'application/json' },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status: b.dataset.s }),
         });
         adminCache.users = null;
@@ -393,10 +393,8 @@ async function loadAdmin(fromCache = false) {
       <button class="btn-danger">Delete</button>`;
     row.querySelector('.btn-danger').onclick = async () => {
       if (!confirm(`Permanently delete chat ${c.id} and its ${c.count} videos?`)) return;
-      await fetch(`/api/admin/chats/${c.id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${pass}` },
-      });
+      await fetch(`/api/admin/chats/${c.id}`, { method: 'DELETE' });
+      adminCache.chats = null;
       loadAdmin();
     };
     list.appendChild(row);

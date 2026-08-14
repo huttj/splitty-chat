@@ -106,6 +106,10 @@ const redirectWithSession = (sid, to) =>
 const blockedPage = () =>
   new Response('This account has been blocked.', { status: 403, headers: { 'Content-Type': 'text/plain' } });
 
+const isAdmin = (env, user) =>
+  !!user?.email &&
+  (env.ADMIN_EMAIL || '').toLowerCase().split(',').map(s => s.trim()).includes(user.email.toLowerCase());
+
 // account-stamped messages belong to the account; legacy rows fall back to name match
 async function ownsMessage(request, env, row, claimedAuthor) {
   if (row.user_id) {
@@ -142,7 +146,7 @@ export default {
       // ---- auth routes ----
       if (pathname === '/api/me' && request.method === 'GET') {
         const user = await getUser(request, env);
-        return json({ user, providers: providers(env), authEnabled: authEnabled(env) });
+        return json({ user, providers: providers(env), authEnabled: authEnabled(env), isAdmin: isAdmin(env, user) });
       }
 
       if (pathname === '/auth/logout' && request.method === 'POST') {
@@ -279,12 +283,10 @@ export default {
         return json({ chats: out });
       }
 
-      // ---- admin (password-protected) ----
+      // ---- admin (session-gated: signed-in accounts on the ADMIN_EMAIL list) ----
       if (pathname.startsWith('/api/admin/')) {
-        if (!env.ADMIN_PASSWORD) return json({ error: 'admin not configured' }, 503);
-        if (request.headers.get('Authorization') !== `Bearer ${env.ADMIN_PASSWORD}`) {
-          return json({ error: 'unauthorized' }, 401);
-        }
+        const user = await getUser(request, env);
+        if (!isAdmin(env, user)) return json({ error: 'admins only' }, user ? 403 : 401);
       }
 
       if (pathname === '/api/admin/chats' && request.method === 'GET') {

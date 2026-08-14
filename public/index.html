@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=35">
+  <link rel="stylesheet" href="/style.css?v=36">
 </head>
 <body>
 
@@ -84,10 +84,10 @@
   <div id="admin" class="hidden">
     <div class="admin-inner">
       <h1>splitty admin</h1>
-      <form id="admin-login" class="hidden">
-        <input id="admin-pass" type="password" placeholder="Password" autocomplete="current-password">
-        <button class="btn-primary">Enter</button>
-      </form>
+      <div id="admin-denied" class="hidden">
+        <p class="muted" id="admin-denied-msg"></p>
+        <a id="admin-signin" class="btn-primary hidden" href="/auth/google?next=%2Fadmin">Sign in</a>
+      </div>
       <div id="admin-tabs" class="hidden">
         <button id="tab-chats" class="tab active">Chats</button>
         <button id="tab-users" class="tab">Users</button>
@@ -128,6 +128,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=35"></script>
+  <script src="/app.js?v=36"></script>
 </body>
 </html>
