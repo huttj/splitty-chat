@@ -30,7 +30,7 @@ async function getUser(request, env) {
   const sid = getCookie(request, 'sid');
   if (!sid) return null;
   return await env.DB.prepare(
-    'SELECT u.id, u.name, u.email, u.status FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.sid = ?'
+    'SELECT u.id, u.name, u.email, u.status, u.picture FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.sid = ?'
   ).bind(sid).first();
 }
 
@@ -61,17 +61,23 @@ async function sendEmail(env, to, subject, html) {
 // login/link resolution: an existing identity wins; otherwise attach to the
 // signed-in user (explicit account linking); otherwise to a user with the same
 // verified email; otherwise create a fresh pending account and notify the admin
-async function resolveUser(env, ctx, request, { provider, subject, email, name, origin }) {
+async function resolveUser(env, ctx, request, { provider, subject, email, name, picture, origin }) {
   const ident = await env.DB.prepare('SELECT user_id FROM identities WHERE provider = ? AND subject = ?')
     .bind(provider, subject).first();
   if (ident) {
-    return await env.DB.prepare('SELECT id, name, email, status FROM users WHERE id = ?')
+    if (picture) {
+      await env.DB.prepare('UPDATE users SET picture = ? WHERE id = ?').bind(picture, ident.user_id).run();
+    }
+    return await env.DB.prepare('SELECT id, name, email, status, picture FROM users WHERE id = ?')
       .bind(ident.user_id).first();
   }
   let user = await getUser(request, env);
   if (!user && email) {
-    user = await env.DB.prepare('SELECT id, name, email, status FROM users WHERE email IS NOT NULL AND lower(email) = lower(?)')
+    user = await env.DB.prepare('SELECT id, name, email, status, picture FROM users WHERE email IS NOT NULL AND lower(email) = lower(?)')
       .bind(email).first();
+  }
+  if (user && picture && !user.picture) {
+    await env.DB.prepare('UPDATE users SET picture = ? WHERE id = ?').bind(picture, user.id).run();
   }
   if (!user) {
     user = {
@@ -79,9 +85,10 @@ async function resolveUser(env, ctx, request, { provider, subject, email, name, 
       name: String(name || (email || 'someone').split('@')[0]).slice(0, 40),
       email: email || null,
       status: 'pending',
+      picture: picture || null,
     };
-    await env.DB.prepare('INSERT INTO users (id, name, email, status, created_at) VALUES (?, ?, ?, ?, ?)')
-      .bind(user.id, user.name, user.email, user.status, Date.now()).run();
+    await env.DB.prepare('INSERT INTO users (id, name, email, status, picture, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .bind(user.id, user.name, user.email, user.status, user.picture, Date.now()).run();
     for (const admin of (env.ADMIN_EMAIL || '').split(',').map(s => s.trim()).filter(Boolean)) {
       ctx.waitUntil(sendEmail(env, admin, `${user.name} just joined splitty.chat`,
         `<p><b>${user.name}</b> (${user.email || provider}) just signed up. They can send one message until approved.</p>
@@ -95,6 +102,9 @@ async function resolveUser(env, ctx, request, { provider, subject, email, name, 
 
 const redirectWithSession = (sid, to) =>
   new Response(null, { status: 302, headers: { Location: to, 'Set-Cookie': SESSION_COOKIE(sid) } });
+
+const blockedPage = () =>
+  new Response('This account has been blocked.', { status: 403, headers: { 'Content-Type': 'text/plain' } });
 
 // account-stamped messages belong to the account; legacy rows fall back to name match
 async function ownsMessage(request, env, row, claimedAuthor) {
@@ -119,6 +129,7 @@ const rowToMessage = r => ({
   words: JSON.parse(r.words || '[]'),
   transcriptStatus: r.transcript_status,
   gain: r.gain ?? 1,
+  picture: r.picture || null,
 });
 
 export default {
@@ -189,8 +200,10 @@ export default {
           subject: claims.sub,
           email: claims.email_verified ? claims.email : null,
           name: claims.name,
+          picture: claims.picture || null,
           origin: url.origin,
         });
+        if (user.status === 'blocked') return blockedPage();
         const sid = await createSession(env, user.id);
         return redirectWithSession(sid, safePath(nextParts.join(':')));
       }
@@ -222,8 +235,10 @@ export default {
           subject: row.email.toLowerCase(),
           email: row.email,
           name: null,
+          picture: null,
           origin: url.origin,
         });
+        if (user.status === 'blocked') return blockedPage();
         const sid = await createSession(env, user.id);
         return redirectWithSession(sid, safePath(url.searchParams.get('next')));
       }
@@ -295,7 +310,7 @@ export default {
 
       if (pathname === '/api/admin/users' && request.method === 'GET') {
         const { results } = await env.DB.prepare(
-          `SELECT u.id, u.name, u.email, u.status, u.created_at, COUNT(msg.id) AS n,
+          `SELECT u.id, u.name, u.email, u.status, u.picture, u.created_at, COUNT(msg.id) AS n,
                   GROUP_CONCAT(DISTINCT i.provider) AS provs
            FROM users u
            LEFT JOIN messages msg ON msg.user_id = u.id
@@ -304,7 +319,7 @@ export default {
         ).all();
         return json({
           users: results.map(u => ({
-            id: u.id, name: u.name, email: u.email, status: u.status,
+            id: u.id, name: u.name, email: u.email, status: u.status, picture: u.picture,
             createdAt: u.created_at, messages: u.n, providers: (u.provs || '').split(',').filter(Boolean),
           })),
         });
@@ -336,7 +351,9 @@ export default {
         const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
         if (!chat) return json({ error: 'not found' }, 404);
         const { results } = await env.DB
-          .prepare('SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at')
+          .prepare(`SELECT msg.*, u.picture FROM messages msg
+                    LEFT JOIN users u ON u.id = msg.user_id
+                    WHERE msg.chat_id = ? ORDER BY msg.created_at`)
           .bind(m[1]).all();
         return json({
           chat: { id: chat.id, createdAt: chat.created_at },
