@@ -203,6 +203,7 @@ function initChat() {
   };
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
+  $('#btn-stop').onclick = stopPlayback;
 
   for (const el of players) {
     el.addEventListener('click', () => togglePause());
@@ -214,8 +215,8 @@ function initChat() {
         advanceSegment();
       }
     });
-    el.addEventListener('play', e => e.target === activeEl() && ($('#btn-play').textContent = '⏸'));
-    el.addEventListener('pause', e => e.target === activeEl() && ($('#btn-play').textContent = '▶'));
+    el.addEventListener('play', e => e.target === activeEl() && $('#btn-play').classList.add('playing'));
+    el.addEventListener('pause', e => e.target === activeEl() && $('#btn-play').classList.remove('playing'));
     el.addEventListener('loadedmetadata', e => {
       const v = e.target;
       if (v._pendingSeek != null) {
@@ -402,7 +403,7 @@ function cueAt(idx, at) {
   const vt = seg.vStart + (at - seg.start);
   $('#scrubber').value = vt;
   updateTimeLabel(vt);
-  $('#btn-play').textContent = '▶';
+  $('#btn-play').classList.remove('playing');
   updateHint();
 }
 
@@ -916,7 +917,7 @@ function render() {
   box.innerHTML = '';
 
   if (!state.messages.length) {
-    box.innerHTML = '<div class="empty">Nothing here yet.<br>Record the first video note 👇</div>';
+    box.innerHTML = '<div class="empty">Nothing here yet.<br>Record the first video note.</div>';
     return;
   }
 
@@ -937,7 +938,7 @@ function renderMessage(msg, depth) {
 
   const head = document.createElement('div');
   head.className = 'msg-head';
-  head.innerHTML = `<button class="play-btn" title="Play from start">▶</button>
+  head.innerHTML = `<button class="play-btn" title="Play from start"><svg class="ic" viewBox="0 0 16 16"><path d="M4.5 2.2 13.5 8l-9 5.8z"/></svg></button>
     <span class="author"></span>
     <span class="time">${fmtTime(msg.createdAt)}</span>
     <span class="dur">${fmtClock(msgDur(msg))}</span>

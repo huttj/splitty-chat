@@ -171,7 +171,11 @@ body {
   display: inline-flex; align-items: center; gap: 5px;
 }
 .ti { font-size: 15px; line-height: 1; }
-.t-play { font-size: 21px; line-height: 1; min-width: 54px; padding: 6px 14px; justify-content: center; }
+.t-play { min-width: 56px; padding: 10px 16px; justify-content: center; }
+.ic { width: 16px; height: 16px; fill: currentColor; display: block; }
+#btn-play .ic-pause { display: none; }
+#btn-play.playing .ic-play { display: none; }
+#btn-play.playing .ic-pause { display: block; }
 .t-btn:active { transform: scale(0.95); }
 .t-play { font-size: 15px; min-width: 44px; }
 #time-label { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
@@ -225,8 +229,10 @@ body {
 }
 .play-btn {
   background: var(--accent-soft); color: var(--accent); border: 0; border-radius: 8px;
-  width: 28px; height: 28px; cursor: pointer; font-size: 12px; flex-shrink: 0;
+  width: 28px; height: 28px; cursor: pointer; flex-shrink: 0;
+  display: grid; place-items: center;
 }
+.play-btn .ic { width: 12px; height: 12px; }
 .drag-handle {
   margin-left: auto; color: var(--muted); cursor: grab;
   touch-action: none; user-select: none; padding: 2px 6px; font-size: 15px;
