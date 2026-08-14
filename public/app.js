@@ -208,7 +208,7 @@ function initChat() {
   for (const el of players) {
     el.addEventListener('click', () => togglePause());
     el.addEventListener('timeupdate', e => e.target === activeEl() && onTimeUpdate());
-    el.addEventListener('ended', e => e.target === activeEl() && advanceSegment());
+    el.addEventListener('ended', e => e.target === activeEl() && advanceSegment(state.playIdx));
     el.addEventListener('error', e => {
       if (state.playing && e.target === activeEl()) {
         showToast("Couldn't play that one — skipping");
@@ -549,8 +549,9 @@ function prepareNext(idx) {
   stb._preparedKey = key;
 }
 
-function advanceSegment() {
-  if (!state.playing) return;
+function advanceSegment(fromIdx = state.playIdx) {
+  // both the frame ticker and timeupdate watch the boundary — only advance once
+  if (!state.playing || fromIdx !== state.playIdx) return;
   const cur = state.playlist[state.playIdx];
   if (cur) markSeen(cur.id, Math.ceil(cur.end * 1000)); // finished segments count as fully heard
   if (state.playIdx + 1 < state.playlist.length) playSegment(state.playIdx + 1);
@@ -672,7 +673,11 @@ function tickHighlight() {
   // runs while paused too, so the highlight stays parked where you landed
   const el = activeEl();
   const seg = state.playlist[state.playIdx];
-  if (seg) focusWordAt(seg, el.currentTime, 'speaking');
+  if (!seg) return;
+  // frame-rate boundary enforcement: cut to the next segment within ~16ms of
+  // the splice point, instead of overshooting by a whole timeupdate interval
+  if (!el.paused && el.currentTime >= seg.end - 0.015) return advanceSegment(state.playIdx);
+  focusWordAt(seg, el.currentTime, 'speaking');
 }
 requestAnimationFrame(tickHighlight);
 
@@ -723,7 +728,7 @@ function onTimeUpdate() {
   const seg = state.playlist[state.playIdx];
   const t = activeEl().currentTime;
 
-  if (t >= seg.end - 0.05) return advanceSegment();
+  if (t >= seg.end - 0.05) return advanceSegment(state.playIdx); // fallback; the frame ticker cuts tighter
 
   $('#scrubber').value = currentVT();
   updateTimeLabel(currentVT());
