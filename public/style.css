@@ -245,8 +245,14 @@ body {
 body.dragging-anchor { cursor: grabbing; user-select: none; }
 body.dragging-anchor .word { cursor: grabbing; }
 .word.drop-target {
-  background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--accent); color: #fff; border-radius: 4px;
+  box-shadow: inset 3px 0 0 #fff, 0 0 14px rgba(124, 92, 255, 0.6);
+}
+.msg.drag-src { outline: 2px dashed var(--accent); opacity: 0.85; }
+#drop-ghost {
+  position: absolute; top: 50%; transform: translateY(-50%); height: 12px;
+  border-radius: 4px; opacity: 0.9; outline: 2px dashed rgba(255, 255, 255, 0.7);
+  pointer-events: none; z-index: 1;
 }
 
 .msg-body { font-size: 16px; }

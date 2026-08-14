@@ -431,13 +431,21 @@ function msgDur(msg) {
   return 3;
 }
 
+// An anchor that lands inside a word snaps to the word's end — cuts never
+// happen mid-word, and playback order matches the transcript split (which
+// places a word by its start time).
+function snapAnchor(msg, tSec) {
+  const w = msg.words.find(w => tSec > w.s && tSec < w.e);
+  return w ? w.e : tSec;
+}
+
 // Expand a message into playable segments, interleaving interjections at their anchors.
 function segmentsFor(msg) {
   const dur = msgDur(msg);
   const segs = [];
   let cursor = 0;
   for (const kid of childrenOf(msg.id)) {
-    const t = Math.min((kid.anchorMs || 0) / 1000, dur);
+    const t = Math.min(snapAnchor(msg, (kid.anchorMs || 0) / 1000), dur);
     if (t > cursor) segs.push({ id: msg.id, start: cursor, end: t });
     segs.push(...segmentsFor(kid));
     cursor = Math.max(cursor, t);
@@ -882,8 +890,14 @@ async function uploadRecording(videoBlob, audioBlob, rec) {
     alert('Upload failed — check the server.');
   }
   await poll();
-  if (rec.resume) playFrom(rec.resume.msgId, rec.resume.atSec);
-  else updateStage();
+  if (rec.resume) {
+    // resume just past the (snapped) splice so you don't replay your own interjection
+    const parent = state.byId.get(rec.resume.msgId);
+    const at = parent ? snapAnchor(parent, rec.resume.atSec) + 0.001 : rec.resume.atSec;
+    playFrom(rec.resume.msgId, at);
+  } else {
+    updateStage();
+  }
   updateHint();
 }
 
@@ -969,11 +983,32 @@ function startAnchorDrag(e, msg) {
   e.preventDefault();
   state.dragging = { msg, target: null };
   document.body.classList.add('dragging-anchor');
+  const srcCard = e.target.closest('.msg');
+  srcCard?.classList.add('drag-src');
+  const ghost = $('#drop-ghost');
 
   const setTarget = el => {
     state.dragging.target?.classList.remove('drop-target');
     state.dragging.target = el;
     el?.classList.add('drop-target');
+    // project the drop onto the seek track: where it would land, and how long it runs
+    if (el && state.vDur > 0) {
+      if (!state.playlist.length) buildPlaylist();
+      const wS = Number(el.dataset.t);
+      const idx = state.playlist.findIndex(
+        s => s.id === msg.parentId && wS >= s.start - 0.001 && wS < s.end
+      );
+      if (idx >= 0) {
+        const seg = state.playlist[idx];
+        const vt = seg.vStart + (wS - seg.start);
+        ghost.style.left = `${(vt / state.vDur) * 100}%`;
+        ghost.style.width = `${Math.max((msgDur(msg) / state.vDur) * 100, 1.5)}%`;
+        ghost.style.background = colorFor(msg.author);
+        ghost.classList.remove('hidden');
+        return;
+      }
+    }
+    ghost.classList.add('hidden');
   };
   const onMove = ev => {
     const el = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -982,6 +1017,8 @@ function startAnchorDrag(e, msg) {
   const onUp = async () => {
     document.removeEventListener('pointermove', onMove);
     document.body.classList.remove('dragging-anchor');
+    srcCard?.classList.remove('drag-src');
+    ghost.classList.add('hidden');
     const target = state.dragging.target;
     target?.classList.remove('drop-target');
     state.dragging = null;
