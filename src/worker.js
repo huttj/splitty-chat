@@ -22,6 +22,7 @@ const rowToMessage = r => ({
   text: r.text,
   words: JSON.parse(r.words || '[]'),
   transcriptStatus: r.transcript_status,
+  gain: r.gain ?? 1,
 });
 
 export default {
@@ -189,6 +190,7 @@ async function createMessage(request, env, ctx, chatId) {
     parentId,
     anchorMs: parentId ? Math.max(0, Number(form.get('anchorMs')) || 0) : null,
     durationMs: Number(form.get('durationMs')) || null,
+    gain: Math.min(Math.max(Number(form.get('gain')) || 1, 0.25), 4),
     createdAt: Date.now(),
     text: '',
     words: [],
@@ -196,9 +198,9 @@ async function createMessage(request, env, ctx, chatId) {
   };
 
   await env.DB.prepare(
-    `INSERT INTO messages (id, chat_id, author, video_key, mime, parent_id, anchor_ms, duration_ms, created_at, transcript_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
-  ).bind(msg.id, msg.chatId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.durationMs, msg.createdAt).run();
+    `INSERT INTO messages (id, chat_id, author, video_key, mime, parent_id, anchor_ms, duration_ms, gain, created_at, transcript_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+  ).bind(msg.id, msg.chatId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.durationMs, msg.gain, msg.createdAt).run();
 
   // transcribe after the response goes out; client polls for the result
   const transcriptSource = audio instanceof File && audio.size > 0 ? audio : video;

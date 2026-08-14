@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at INTEGER NOT NULL,
   text TEXT NOT NULL DEFAULT '',
   words TEXT NOT NULL DEFAULT '[]',
-  transcript_status TEXT NOT NULL DEFAULT 'pending'
+  transcript_status TEXT NOT NULL DEFAULT 'pending',
+  gain REAL DEFAULT 1  -- client-measured loudness correction; added to live DB 2026-08-14 via ALTER
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);

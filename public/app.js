@@ -47,6 +47,65 @@ if (chatMatch) {
   initLanding();
 }
 
+// ---------- audio normalization ----------
+// Playback runs through a shared compressor (levels within-clip swings), and each
+// message carries a client-measured gain (levels quiet vs loud speakers).
+let audioCtx = null, compressorIn = null;
+function audioChainFor(el) {
+  try {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const comp = audioCtx.createDynamicsCompressor();
+      comp.threshold.value = -24;
+      comp.knee.value = 12;
+      comp.ratio.value = 3;
+      comp.attack.value = 0.01;
+      comp.release.value = 0.25;
+      const makeup = audioCtx.createGain();
+      makeup.gain.value = 1.25;
+      comp.connect(makeup).connect(audioCtx.destination);
+      compressorIn = comp;
+      // autoplay policy can leave the context suspended — any tap wakes it
+      document.addEventListener('pointerdown', () => audioCtx.resume(), { capture: true });
+    }
+    if (!el._gainNode) {
+      const src = audioCtx.createMediaElementSource(el);
+      el._gainNode = audioCtx.createGain();
+      src.connect(el._gainNode).connect(compressorIn);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return el._gainNode;
+  } catch {
+    return null; // chain failed — element keeps its direct audio path
+  }
+}
+
+function setMsgGain(el, msg) {
+  const node = audioChainFor(el);
+  if (node) node.gain.value = msg?.gain || 1;
+}
+
+// average RMS of the non-silent blocks, mapped to a bounded correction gain
+async function measureGain(blob) {
+  try {
+    const ctx = new OfflineAudioContext(1, 8000, 16000);
+    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
+    const data = buf.getChannelData(0);
+    let sum = 0, n = 0;
+    for (let i = 0; i < data.length; i += 2048) {
+      let s = 0;
+      const end = Math.min(i + 2048, data.length);
+      for (let j = i; j < end; j++) s += data[j] * data[j];
+      const rms = Math.sqrt(s / (end - i));
+      if (rms > 0.01) { sum += rms; n++; } // skip silence so pauses don't skew it
+    }
+    if (!n) return 1;
+    return Math.min(Math.max(0.1 / (sum / n), 0.5), 4); // target ≈ -20 dBFS
+  } catch {
+    return 1;
+  }
+}
+
 // ---------- always-on camera ----------
 let camStream = null;
 let camError = null;
@@ -420,6 +479,7 @@ function cueAt(idx, at, autoplay = false) {
   el._autoplay = autoplay;
   el.src = mediaUrl(msg);
   players.forEach(p => (p.playbackRate = state.speed));
+  setMsgGain(el, msg);
   prepareNext(idx);
   updateStage();
   const vt = seg.vStart + (at - seg.start);
@@ -537,6 +597,7 @@ function playSegment(idx, offset, autoplay = true) {
     }
   }
   players.forEach(p => (p.playbackRate = state.speed));
+  setMsgGain(activeEl(), msg); // per-speaker loudness correction
   prepareNext(idx);
   state.playLabel = msg.author;
   updateStage();
@@ -877,6 +938,7 @@ async function uploadRecording(videoBlob, audioBlob, rec) {
   }
   fd.append('author', state.name || 'anon');
   fd.append('durationMs', String(Date.now() - rec.startTs));
+  if (audioBlob && audioBlob.size) fd.append('gain', String(await measureGain(audioBlob)));
   if (rec.parentId) {
     fd.append('parentId', rec.parentId);
     fd.append('anchorMs', String(rec.anchorMs));
