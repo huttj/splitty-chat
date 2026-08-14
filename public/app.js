@@ -287,6 +287,7 @@ function initChat() {
   let lastScrubPreview = 0;
   scrubber.addEventListener('pointerdown', () => {
     state.scrubbing = true;
+    state.scrubResume = state.playing && !activeEl().paused; // restore this on release
     clearWordHighlight();
   });
   scrubber.addEventListener('input', () => {
@@ -306,7 +307,8 @@ function initChat() {
     if (!state.scrubbing) return;
     state.scrubbing = false;
     clearScrubFocus();
-    seekVirtual(Number(scrubber.value));
+    // paused stays paused, playing keeps playing
+    seekVirtual(Number(scrubber.value), state.scrubResume);
   };
   scrubber.addEventListener('change', endScrub);
   scrubber.addEventListener('pointerup', endScrub);
@@ -491,7 +493,7 @@ function playFrom(msgId, atSec) {
   playSegment(idx, Math.max(atSec, state.playlist[idx].start));
 }
 
-function playSegment(idx, offset) {
+function playSegment(idx, offset, autoplay = true) {
   const seg = state.playlist[idx];
   const msg = state.byId.get(seg.id);
   if (!msg) return stopPlayback();
@@ -505,15 +507,15 @@ function playSegment(idx, offset) {
     // seamless handoff: the standby element is already loaded and parked at seg.start
     activeEl().pause();
     state.activeIdx ^= 1;
-    activeEl().play();
+    if (autoplay) activeEl().play();
   } else {
     const el = activeEl();
     if (el.src === src) {
       el.currentTime = at;
-      el.play();
+      autoplay ? el.play() : el.pause();
     } else {
       el._pendingSeek = at;
-      el._autoplay = true;
+      el._autoplay = autoplay;
       el.src = src;
     }
   }
@@ -577,17 +579,16 @@ function currentVT() {
   return seg.vStart + within;
 }
 
-function seekVirtual(vt) {
+function seekVirtual(vt, autoplay = true) {
   if (!state.playlist.length) return;
   vt = Math.min(Math.max(vt, 0), Math.max(state.vDur - 0.05, 0));
-  let idx = state.playlist.findIndex(s => vt < s.vEnd);
-  if (idx === -1) idx = state.playlist.length - 1;
+  const idx = segIdxAt(vt);
   const seg = state.playlist[idx];
-  playSegment(idx, seg.start + (vt - seg.vStart));
+  playSegment(idx, seg.start + (vt - seg.vStart), autoplay);
 }
 
 function skip(delta) {
-  if (state.playing) seekVirtual(currentVT() + delta);
+  if (state.playing) seekVirtual(currentVT() + delta, !activeEl().paused);
 }
 
 function segIdxAt(vt) {
