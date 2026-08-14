@@ -211,12 +211,17 @@ body {
 
 /* ---------- messages ---------- */
 .msg {
-  background: var(--panel); border-radius: var(--radius); padding: 12px 14px;
+  position: relative;
+  background: var(--panel); border-radius: 10px; padding: 12px 14px 12px 18px;
   margin-bottom: 14px; border: 1px solid transparent;
-  border-left: 3px solid transparent; /* per-speaker color set inline */
+}
+/* speaker bar: straight rule inset from the corners, not a border that bends around them */
+.msg::before {
+  content: ''; position: absolute; left: 7px; top: 12px; bottom: 12px;
+  width: 3px; border-radius: 1.5px; background: var(--author-color, transparent);
 }
 .msg .msg { margin: 10px 0; background: var(--panel-2); }   /* interjections nest inline */
-.msg.is-new { border-top-color: rgba(255, 209, 102, 0.35); border-right-color: rgba(255, 209, 102, 0.35); border-bottom-color: rgba(255, 209, 102, 0.35); }
+.msg.is-new { border-color: rgba(255, 209, 102, 0.35); }
 
 .msg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .author { font-weight: 650; font-size: 14px; }

@@ -226,7 +226,7 @@ function initChat() {
       v.playbackRate = state.speed;
       if (v._autoplay) {
         v._autoplay = false;
-        v.play();
+        v.play().catch(() => {}); // autoplay may be blocked — stays cued, button shows play
       }
     });
   }
@@ -276,11 +276,18 @@ function initChat() {
     document.addEventListener('pointerup', onUp, { once: true });
   });
 
-  // undo anchor moves with cmd/ctrl+Z
+  // undo anchor moves with cmd/ctrl+Z; space toggles play/pause
   document.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'z') {
       e.preventDefault();
       undoLast();
+      return;
+    }
+    if (e.code === 'Space' && !e.repeat) {
+      const a = document.activeElement;
+      if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.isContentEditable)) return;
+      e.preventDefault();
+      togglePause();
     }
   });
   const scrubber = $('#scrubber');
@@ -384,7 +391,7 @@ async function poll() {
 function cueFirstUnheard() {
   buildPlaylist();
   if (!state.playlist.length) return;
-  let idx = 0, at = state.playlist[0].start;
+  let idx = 0, at = state.playlist[0].start, foundUnheard = false;
   for (let i = 0; i < state.playlist.length; i++) {
     const seg = state.playlist[i];
     const msg = state.byId.get(seg.id);
@@ -393,13 +400,15 @@ function cueFirstUnheard() {
     if (seenSec < seg.end - 0.3) {
       idx = i;
       at = Math.max(seg.start, seenSec);
+      foundUnheard = true;
       break;
     }
   }
-  cueAt(idx, at);
+  // unheard content starts playing on arrival (stays cued if the browser blocks autoplay)
+  cueAt(idx, at, foundUnheard);
 }
 
-function cueAt(idx, at) {
+function cueAt(idx, at, autoplay = false) {
   const seg = state.playlist[idx];
   const msg = state.byId.get(seg.id);
   if (!msg) return;
@@ -408,7 +417,7 @@ function cueAt(idx, at) {
   state.playLabel = msg.author;
   const el = activeEl();
   el._pendingSeek = at;
-  el._autoplay = false;
+  el._autoplay = autoplay;
   el.src = mediaUrl(msg);
   players.forEach(p => (p.playbackRate = state.speed));
   prepareNext(idx);
@@ -1064,7 +1073,7 @@ function renderMessage(msg, depth) {
 
   const card = document.createElement('div');
   card.className = `msg${isNew ? ' is-new' : ''}${mine ? ' mine' : ''}`;
-  card.style.borderLeftColor = colorFor(msg.author); // color-coded by speaker
+  card.style.setProperty('--author-color', colorFor(msg.author)); // speaker bar color
 
   const head = document.createElement('div');
   head.className = 'msg-head';
