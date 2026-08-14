@@ -249,6 +249,16 @@ body.dragging-anchor .word { cursor: grabbing; }
 .word:hover { background: var(--accent-soft); }
 .word.unseen { background: rgba(255, 209, 102, 0.16); color: var(--new); }
 .word.speaking { background: var(--accent); color: #fff; }
+/* scrubbing: focal glow slides through the word at the interpolated position */
+.word.scrub-focus {
+  color: #fff;
+  border-radius: 4px;
+  background: linear-gradient(90deg,
+    rgba(124, 92, 255, 0.18) calc(var(--f, 50%) - 35%),
+    var(--accent) var(--f, 50%),
+    rgba(124, 92, 255, 0.18) calc(var(--f, 50%) + 35%));
+  box-shadow: 0 0 14px rgba(124, 92, 255, 0.5);
+}
 
 /* ---------- controls: floating record button ---------- */
 #controls {

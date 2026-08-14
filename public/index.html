@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=14">
+  <link rel="stylesheet" href="/style.css?v=15">
 </head>
 <body>
 
@@ -41,12 +41,12 @@
         </div>
         <div id="transport-row">
           <button id="btn-back" class="t-btn" title="Back 10s"><span class="ti">↺</span>10s</button>
+          <button id="btn-stop" class="t-btn t-play" title="Stop — next recording starts a new message">
+            <svg class="ic" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>
+          </button>
           <button id="btn-play" class="t-btn t-play playing" title="Play/pause">
             <svg class="ic ic-play" viewBox="0 0 16 16"><path d="M4.5 2.2 13.5 8l-9 5.8z"/></svg>
             <svg class="ic ic-pause" viewBox="0 0 16 16"><path d="M3.5 2.5h3.4v11H3.5zM9.1 2.5h3.4v11H9.1z"/></svg>
-          </button>
-          <button id="btn-stop" class="t-btn t-play" title="Stop — next recording starts a new message">
-            <svg class="ic" viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/></svg>
           </button>
           <button id="btn-fwd" class="t-btn" title="Forward 10s">10s<span class="ti">↻</span></button>
           <button id="btn-speed" class="t-btn" title="Playback speed">1×</button>
@@ -97,6 +97,6 @@
     </form>
   </div>
 
-  <script src="/app.js?v=14"></script>
+  <script src="/app.js?v=15"></script>
 </body>
 </html>

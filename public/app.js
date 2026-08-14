@@ -285,10 +285,14 @@ function initChat() {
   });
   const scrubber = $('#scrubber');
   let lastScrubPreview = 0;
-  scrubber.addEventListener('pointerdown', () => (state.scrubbing = true));
+  scrubber.addEventListener('pointerdown', () => {
+    state.scrubbing = true;
+    clearWordHighlight();
+  });
   scrubber.addEventListener('input', () => {
     const vt = Number(scrubber.value);
     updateTimeLabel(vt);
+    scrubFocus(vt); // transcript focal glow tracks every input event
     // live (throttled) frame preview while dragging
     const now = performance.now();
     if (now - lastScrubPreview > 150) {
@@ -298,6 +302,7 @@ function initChat() {
   });
   scrubber.addEventListener('change', () => {
     state.scrubbing = false;
+    clearScrubFocus();
     seekVirtual(Number(scrubber.value));
   });
 
@@ -579,12 +584,43 @@ function skip(delta) {
   if (state.playing) seekVirtual(currentVT() + delta);
 }
 
+function segIdxAt(vt) {
+  const idx = state.playlist.findIndex(s => vt < s.vEnd);
+  return idx === -1 ? state.playlist.length - 1 : idx;
+}
+
+// while dragging: glow the word under the playhead, with the hotspot positioned
+// proportionally through the word (interpolated from its start/end timestamps)
+function scrubFocus(vt) {
+  clearScrubFocus();
+  if (!state.playlist.length) return;
+  const seg = state.playlist[segIdxAt(vt)];
+  const msg = state.byId.get(seg.id);
+  if (!msg || !msg.words.length) return;
+  const t = seg.start + (vt - seg.vStart);
+  let i = msg.words.findIndex(w => t < w.e);
+  if (i === -1) i = msg.words.length - 1;
+  const w = msg.words[i];
+  const f = w.e > w.s ? Math.min(Math.max((t - w.s) / (w.e - w.s), 0), 1) : 0;
+  const span = document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`);
+  if (!span) return;
+  span.classList.add('scrub-focus');
+  span.style.setProperty('--f', `${(f * 100).toFixed(1)}%`);
+  span.scrollIntoView({ block: 'nearest' });
+}
+
+function clearScrubFocus() {
+  document.querySelectorAll('.word.scrub-focus').forEach(el => {
+    el.classList.remove('scrub-focus');
+    el.style.removeProperty('--f');
+  });
+}
+
 // show the frame at a virtual time without playing (used while dragging the scrubber)
 function previewVirtual(vt) {
   if (!state.playing || !state.playlist.length) return;
   vt = Math.min(Math.max(vt, 0), Math.max(state.vDur - 0.05, 0));
-  let idx = state.playlist.findIndex(s => vt < s.vEnd);
-  if (idx === -1) idx = state.playlist.length - 1;
+  const idx = segIdxAt(vt);
   const seg = state.playlist[idx];
   const msg = state.byId.get(seg.id);
   if (!msg) return;
