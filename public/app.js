@@ -18,6 +18,7 @@ const state = {
   rec: null,         // { recorder, audioRecorder, startTs, parentId, anchorMs, resume, discard }
   undo: [],          // anchor moves: { id, prev }
   scrubbing: false,
+  cued: false,       // opening cue-up (earliest unheard) done
   dragging: null,    // { msg, target } while re-anchoring an interjection
   lastRenderKey: '',
 };
@@ -48,15 +49,39 @@ if (chatMatch) {
 
 // ---------- always-on camera ----------
 let camStream = null;
+let camError = null;
 async function ensureCam() {
   if (camStream && camStream.active) return camStream;
-  camStream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'user', width: { ideal: 960 } },
-    audio: true,
-  });
+  try {
+    camStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 960 } },
+      audio: true,
+    });
+  } catch (err) {
+    camError = err;
+    $('#cam-enable')?.classList.remove('hidden');
+    updateStage();
+    throw err;
+  }
+  camError = null;
+  $('#cam-enable')?.classList.add('hidden');
   preview.srcObject = camStream;
   preview.play();
+  updateStage();
   return camStream;
+}
+
+// Safari only grants the camera from a real tap — retry on the first gesture,
+// and keep an explicit button as the reliable path
+function armCamRetry() {
+  const retry = () =>
+    ensureCam().catch(err => {
+      if (err.name === 'NotAllowedError') {
+        showToast('Camera blocked — allow it via the camera icon in the address bar');
+      }
+    });
+  document.addEventListener('pointerdown', retry, { once: true });
+  $('#cam-enable').onclick = e => { e.stopPropagation(); retry(); };
 }
 
 // ---------- landing ----------
@@ -295,11 +320,11 @@ function initChat() {
       if (!state.name) return;
       localStorage.setItem('splitty:name', state.name);
       $('#name-gate').classList.add('hidden');
-      ensureCam().then(updateStage).catch(() => {});
+      ensureCam().catch(armCamRetry);
     };
   } else {
     // camera warms up immediately so recording is instant; stage shows you while idle
-    ensureCam().then(updateStage).catch(() => {});
+    ensureCam().catch(armCamRetry);
   }
 
   // remember this chat on the landing page
@@ -323,7 +348,52 @@ async function poll() {
     state.messages = data.messages;
     state.byId = new Map(data.messages.map(m => [m.id, m]));
     render();
+    if (!state.cued && state.messages.length && !state.playing && !state.rec) {
+      state.cued = true;
+      cueFirstUnheard();
+    }
   } catch { /* offline blip — try again next poll */ }
+}
+
+// on entry, park the player at the earliest moment you haven't heard
+// (or the very beginning if you're caught up) — paused, ready to go
+function cueFirstUnheard() {
+  buildPlaylist();
+  if (!state.playlist.length) return;
+  let idx = 0, at = state.playlist[0].start;
+  for (let i = 0; i < state.playlist.length; i++) {
+    const seg = state.playlist[i];
+    const msg = state.byId.get(seg.id);
+    if (!msg || msg.author === state.name) continue; // your own words are always "heard"
+    const seenSec = (state.seen[seg.id] || 0) / 1000;
+    if (seenSec < seg.end - 0.3) {
+      idx = i;
+      at = Math.max(seg.start, seenSec);
+      break;
+    }
+  }
+  cueAt(idx, at);
+}
+
+function cueAt(idx, at) {
+  const seg = state.playlist[idx];
+  const msg = state.byId.get(seg.id);
+  if (!msg) return;
+  state.playing = true; // session active, but parked
+  state.playIdx = idx;
+  state.playLabel = msg.author;
+  const el = activeEl();
+  el._pendingSeek = at;
+  el._autoplay = false;
+  el.src = mediaUrl(msg);
+  players.forEach(p => (p.playbackRate = state.speed));
+  prepareNext(idx);
+  updateStage();
+  const vt = seg.vStart + (at - seg.start);
+  $('#scrubber').value = vt;
+  updateTimeLabel(vt);
+  $('#btn-play').textContent = '▶';
+  updateHint('Cued up where you left off — hit play');
 }
 
 // ---------- message tree ----------
@@ -726,7 +796,8 @@ function updateHint(text) {
     text ??
     (state.rec ? '' :
      state.playing ? 'Tap record to jump in — playback pauses, then picks back up' :
-     'Tap record to leave a video note');
+     camStream ? 'Tap record to leave a video note' :
+     'Turn on your camera to record');
 }
 
 // ---------- stage (video area) ----------
@@ -735,8 +806,18 @@ function updateHint(text) {
 function updateStage() {
   const stage = $('#stage');
   const box = $('#video-box');
-  const mode = state.rec ? 'record' : state.playing ? 'play' : camStream ? 'self' : 'none';
+  const mode = state.rec ? 'record' : state.playing ? 'play'
+    : camStream ? 'self' : camError ? 'enable' : 'none';
   if (mode === 'none') { stage.classList.add('hidden'); return; }
+  if (mode === 'enable') {
+    // camera not granted yet: keep the stage visible with the enable button
+    stage.classList.remove('hidden');
+    preview.classList.add('hidden');
+    players.forEach(p => p.classList.add('hidden'));
+    $('#transport').classList.add('hidden');
+    $('#pip-label').textContent = '';
+    return;
+  }
   stage.classList.remove('hidden');
   box.classList.toggle('mode-play', mode === 'play');
   box.classList.toggle('mode-record', mode === 'record');

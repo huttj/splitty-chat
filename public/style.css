@@ -123,6 +123,11 @@ body {
   backdrop-filter: blur(4px); opacity: 0.75;
 }
 #fit-btn:hover { opacity: 1; }
+#cam-enable {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 5;
+  background: var(--accent); color: #fff; border: 0; border-radius: 12px;
+  padding: 12px 20px; font-size: 15px; font-weight: 600; cursor: pointer;
+}
 /* portrait divider: drag up/down to resize the video */
 #splitter {
   display: block; height: 8px; flex-shrink: 0;
