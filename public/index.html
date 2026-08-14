@@ -41,10 +41,13 @@
           <button id="btn-back" class="t-btn" title="Back 10s">↺10</button>
           <button id="btn-play" class="t-btn t-play" title="Play/pause">⏸</button>
           <button id="btn-fwd" class="t-btn" title="Forward 10s">10↻</button>
+          <button id="btn-speed" class="t-btn" title="Playback speed">1×</button>
           <span id="time-label">0:00 / 0:00</span>
         </div>
       </div>
     </div>
+
+    <div id="splitter"></div>
 
     <main id="messages"></main>
 
@@ -54,6 +57,18 @@
         <span class="rec-dot"></span>
       </button>
     </footer>
+  </div>
+
+  <!-- admin -->
+  <div id="admin" class="hidden">
+    <div class="admin-inner">
+      <h1>splitty admin</h1>
+      <form id="admin-login" class="hidden">
+        <input id="admin-pass" type="password" placeholder="Password" autocomplete="current-password">
+        <button class="btn-primary">Enter</button>
+      </form>
+      <div id="admin-list"></div>
+    </div>
   </div>
 
   <!-- name gate -->

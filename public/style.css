@@ -32,8 +32,31 @@ body {
 .tagline { color: var(--muted); margin-bottom: 28px; }
 #recent-chats { margin-top: 40px; text-align: left; }
 #recent-chats h3 { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; }
-.recent-chat { display: block; padding: 10px 14px; margin-bottom: 6px; background: var(--panel); border-radius: 10px; color: var(--text); text-decoration: none; font-size: 14px; }
+.recent-chat { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; margin-bottom: 6px; background: var(--panel); border-radius: 10px; color: var(--text); text-decoration: none; font-size: 14px; }
 .recent-chat:hover { background: var(--panel-2); }
+.rc-names { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rc-meta { color: var(--muted); flex-shrink: 0; }
+
+/* ---------- admin ---------- */
+#admin { min-height: 100dvh; padding: 32px 20px; }
+.admin-inner { max-width: 760px; margin: 0 auto; }
+.admin-inner h1 { margin-bottom: 20px; }
+#admin-login { display: flex; gap: 10px; margin-bottom: 20px; }
+#admin-login input {
+  flex: 1; padding: 10px 14px; border-radius: 10px;
+  border: 1px solid #2e3342; background: var(--panel); color: var(--text); font-size: 15px;
+}
+.admin-row {
+  display: flex; align-items: center; gap: 16px; justify-content: space-between;
+  background: var(--panel); border-radius: 12px; padding: 12px 16px; margin-bottom: 8px;
+}
+.admin-info { display: flex; flex-direction: column; gap: 2px; font-size: 14px; min-width: 0; }
+.admin-info a { color: var(--accent); }
+.btn-danger {
+  background: transparent; color: var(--rec); border: 1px solid var(--rec);
+  border-radius: 9px; padding: 6px 14px; cursor: pointer; flex-shrink: 0;
+}
+.btn-danger:hover { background: var(--rec); color: #fff; }
 
 .btn-primary {
   background: var(--accent); color: #fff; border: 0; border-radius: 12px;
@@ -69,6 +92,14 @@ body {
 }
 #video-box video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 #preview { transform: scaleX(-1); }
+/* while someone else plays, your camera shrinks to a corner PiP */
+#video-box.mode-play #preview {
+  inset: 8px 8px auto auto; width: 32%; height: auto; aspect-ratio: 3/4;
+  border-radius: 10px; border: 1px solid rgba(255,255,255,0.3); z-index: 3;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+}
+#video-box.mode-record { outline: 2px solid var(--rec); outline-offset: -2px; }
+#splitter { display: none; }
 #pip-label {
   position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px; z-index: 2;
   font-size: 11px; color: #fff; background: linear-gradient(transparent, rgba(0,0,0,0.7));
@@ -102,21 +133,29 @@ body {
 .t-play { font-size: 15px; min-width: 44px; }
 #time-label { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
-/* wide / landscape: split screen — video pane left, conversation right */
+/* wide / landscape: split screen — video pane left, conversation right,
+   divider draggable (--split set from JS) */
 @media (min-width: 880px) {
-  #chat { display: grid; grid-template-columns: minmax(320px, 42%) 1fr; grid-template-rows: auto 1fr auto; }
+  #chat { display: grid; grid-template-columns: minmax(280px, var(--split, 42%)) 6px 1fr; grid-template-rows: auto 1fr auto; }
   #chat-header { grid-column: 1 / -1; }
   #stage {
-    grid-column: 1; grid-row: 2 / 4;
-    flex-direction: column; align-items: stretch; justify-content: center;
-    padding: 28px; border-bottom: 0; border-right: 1px solid #22252f;
+    grid-column: 1; grid-row: 2 / 4; min-height: 0;
+    flex-direction: column; align-items: stretch;
+    padding: 16px; border-bottom: 0;
   }
-  #video-box { width: 100%; max-width: 400px; margin: 0 auto; }
-  #transport { flex: 0 0 auto; max-width: 400px; width: 100%; margin: 0 auto; }
+  /* video fills the whole pane */
+  #video-box { width: 100%; max-width: none; margin: 0; flex: 1; min-height: 0; aspect-ratio: auto; }
+  #transport { flex: 0 0 auto; margin-top: 12px; }
   #pip-label { font-size: 13px; padding: 6px 12px; }
-  #messages { grid-column: 2; grid-row: 2; }
-  #controls { grid-column: 2; grid-row: 3; }
-  /* when nothing is playing or recording, give the chat the full width */
+  #splitter {
+    display: block; grid-column: 2; grid-row: 2 / 4;
+    cursor: col-resize; background: #22252f; touch-action: none;
+  }
+  #splitter:hover, #splitter:active { background: var(--accent); }
+  #messages { grid-column: 3; grid-row: 2; }
+  #controls { grid-column: 3; grid-row: 3; }
+  /* no camera + nothing playing: give the chat the full width */
+  #stage.hidden ~ #splitter { display: none; }
   #stage.hidden ~ #messages { grid-column: 1 / -1; }
   #stage.hidden ~ #controls { grid-column: 1 / -1; }
 }

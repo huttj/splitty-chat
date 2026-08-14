@@ -12,7 +12,9 @@ const state = {
   vDur: 0,
   playIdx: -1,
   playing: false,    // a playback session is active (may be paused)
+  playLabel: '',     // author of what's on screen
   activeIdx: 0,      // which of the two <video> elements is live
+  speed: 1,
   rec: null,         // { recorder, audioRecorder, stream, startTs, parentId, anchorMs, resume }
   scrubbing: false,
   dragging: null,    // { msg, target } while re-anchoring an interjection
@@ -30,8 +32,23 @@ const chatMatch = location.pathname.match(/^\/c\/([A-Za-z0-9_-]+)/);
 if (chatMatch) {
   state.chatId = chatMatch[1];
   initChat();
+} else if (location.pathname === '/admin') {
+  initAdmin();
 } else {
   initLanding();
+}
+
+// ---------- always-on camera ----------
+let camStream = null;
+async function ensureCam() {
+  if (camStream && camStream.active) return camStream;
+  camStream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'user', width: { ideal: 960 } },
+    audio: true,
+  });
+  preview.srcObject = camStream;
+  preview.play();
+  return camStream;
 }
 
 // ---------- landing ----------
@@ -43,16 +60,90 @@ function initLanding() {
     location.href = `/c/${id}`;
   };
   const recent = JSON.parse(localStorage.getItem('splitty:recent') || '[]');
-  if (recent.length) {
-    const box = $('#recent-chats');
-    box.innerHTML = '<h3>Your chats</h3>';
-    for (const r of recent.slice(0, 10)) {
-      const a = document.createElement('a');
-      a.href = `/c/${r.id}`;
-      a.className = 'recent-chat';
-      a.textContent = `${r.id} · ${new Date(r.ts).toLocaleDateString()}`;
-      box.appendChild(a);
-    }
+  if (!recent.length) return;
+  const box = $('#recent-chats');
+  box.innerHTML = '<h3>Your chats</h3>';
+  const rows = new Map();
+  for (const r of recent.slice(0, 10)) {
+    const a = document.createElement('a');
+    a.href = `/c/${r.id}`;
+    a.className = 'recent-chat';
+    a.innerHTML = `<span class="rc-names">…</span><span class="rc-meta">${new Date(r.ts).toLocaleDateString()}</span>`;
+    box.appendChild(a);
+    rows.set(r.id, a);
+  }
+  // fill in who's in each chat
+  fetch('/api/chats/lookup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [...rows.keys()] }),
+  })
+    .then(r => r.json())
+    .then(({ chats }) => {
+      const gone = [];
+      for (const c of chats) {
+        const row = rows.get(c.id);
+        if (!row) continue;
+        if (!c.exists) { row.remove(); gone.push(c.id); continue; }
+        const others = (c.participants || []).filter(n => n !== state.name);
+        row.querySelector('.rc-names').textContent =
+          others.length ? `with ${others.join(', ')}` : c.count ? 'just you so far' : 'empty chat';
+        row.querySelector('.rc-meta').textContent = `${c.count} note${c.count === 1 ? '' : 's'}`;
+      }
+      if (gone.length) {
+        const kept = JSON.parse(localStorage.getItem('splitty:recent') || '[]')
+          .filter(r => !gone.includes(r.id));
+        localStorage.setItem('splitty:recent', JSON.stringify(kept));
+      }
+    })
+    .catch(() => {});
+}
+
+// ---------- admin ----------
+function initAdmin() {
+  $('#admin').classList.remove('hidden');
+  $('#admin-login').onsubmit = e => {
+    e.preventDefault();
+    sessionStorage.setItem('splitty:admin', $('#admin-pass').value);
+    loadAdmin();
+  };
+  loadAdmin();
+}
+
+async function loadAdmin() {
+  const pass = sessionStorage.getItem('splitty:admin');
+  const form = $('#admin-login'), list = $('#admin-list');
+  if (!pass) { form.classList.remove('hidden'); return; }
+  const res = await fetch('/api/admin/chats', { headers: { Authorization: `Bearer ${pass}` } });
+  if (!res.ok) {
+    sessionStorage.removeItem('splitty:admin');
+    form.classList.remove('hidden');
+    list.innerHTML = `<p class="muted">${res.status === 401 ? 'Wrong password.' : 'Admin not available.'}</p>`;
+    return;
+  }
+  form.classList.add('hidden');
+  const { chats } = await res.json();
+  list.innerHTML = chats.length ? '' : '<p class="muted">No chats yet.</p>';
+  for (const c of chats) {
+    const row = document.createElement('div');
+    row.className = 'admin-row';
+    row.innerHTML = `
+      <div class="admin-info">
+        <a href="/c/${c.id}" target="_blank">${c.id}</a>
+        <span>${c.participants.length ? escapeHtml(c.participants.join(', ')) : '<em class="muted">empty</em>'}</span>
+        <span class="muted">${c.count} note${c.count === 1 ? '' : 's'} · created ${new Date(c.createdAt).toLocaleString()}${
+          c.lastActivity ? ' · last activity ' + new Date(c.lastActivity).toLocaleString() : ''}</span>
+      </div>
+      <button class="btn-danger">Delete</button>`;
+    row.querySelector('.btn-danger').onclick = async () => {
+      if (!confirm(`Permanently delete chat ${c.id} and its ${c.count} videos?`)) return;
+      await fetch(`/api/admin/chats/${c.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${pass}` },
+      });
+      loadAdmin();
+    };
+    list.appendChild(row);
   }
 }
 
@@ -79,6 +170,7 @@ function initChat() {
         v.currentTime = v._pendingSeek;
         v._pendingSeek = null;
       }
+      v.playbackRate = state.speed;
       if (v._autoplay) {
         v._autoplay = false;
         v.play();
@@ -89,6 +181,37 @@ function initChat() {
   $('#btn-play').onclick = togglePause;
   $('#btn-back').onclick = () => skip(-10);
   $('#btn-fwd').onclick = () => skip(10);
+
+  // playback speed
+  const SPEEDS = [1, 1.25, 1.5, 2, 3];
+  state.speed = Number(localStorage.getItem('splitty:speed')) || 1;
+  if (!SPEEDS.includes(state.speed)) state.speed = 1;
+  const speedBtn = $('#btn-speed');
+  speedBtn.textContent = `${state.speed}×`;
+  speedBtn.onclick = () => {
+    state.speed = SPEEDS[(SPEEDS.indexOf(state.speed) + 1) % SPEEDS.length];
+    localStorage.setItem('splitty:speed', String(state.speed));
+    players.forEach(p => (p.playbackRate = state.speed));
+    speedBtn.textContent = `${state.speed}×`;
+  };
+
+  // draggable split between video pane and chat (wide layout)
+  const chatEl = $('#chat');
+  const savedSplit = localStorage.getItem('splitty:split');
+  if (savedSplit) chatEl.style.setProperty('--split', savedSplit);
+  $('#splitter').addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const onMove = ev => {
+      const px = Math.min(Math.max(ev.clientX, 280), window.innerWidth - 380);
+      chatEl.style.setProperty('--split', `${px}px`);
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      localStorage.setItem('splitty:split', chatEl.style.getPropertyValue('--split'));
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp, { once: true });
+  });
   const scrubber = $('#scrubber');
   scrubber.addEventListener('pointerdown', () => (state.scrubbing = true));
   scrubber.addEventListener('input', () => updateTimeLabel(Number(scrubber.value)));
@@ -105,7 +228,11 @@ function initChat() {
       if (!state.name) return;
       localStorage.setItem('splitty:name', state.name);
       $('#name-gate').classList.add('hidden');
+      ensureCam().then(updateStage).catch(() => {});
     };
+  } else {
+    // camera warms up immediately so recording is instant; stage shows you while idle
+    ensureCam().then(updateStage).catch(() => {});
   }
 
   // remember this chat on the landing page
@@ -227,8 +354,10 @@ function playSegment(idx, offset) {
       el.src = src;
     }
   }
+  players.forEach(p => (p.playbackRate = state.speed));
   prepareNext(idx);
-  showStage('play', msg.author);
+  state.playLabel = msg.author;
+  updateStage();
   updateHint();
 }
 
@@ -265,7 +394,7 @@ function stopPlayback() {
   state.playing = false;
   state.playIdx = -1;
   for (const el of players) { el.pause(); el._preparedKey = null; }
-  hideStage();
+  updateStage();
   clearWordHighlight();
   updateHint();
 }
@@ -377,10 +506,7 @@ async function toggleRecord() {
 
   let stream;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 960 } },
-      audio: true,
-    });
+    stream = await ensureCam(); // already warm in the normal case — instant start
   } catch (err) {
     alert('Camera/mic access is needed to record. ' + err.message);
     if (resume) playFrom(resume.msgId, resume.atSec);
@@ -417,14 +543,12 @@ async function toggleRecord() {
   recorder.onstop = onStop;
   audioRecorder.onstop = onStop;
 
-  preview.srcObject = stream;
-  preview.play();
-  showStage('record');
   $('#rec-btn').classList.add('recording');
 
-  state.rec = { recorder, audioRecorder, stream, startTs: Date.now(), parentId, anchorMs, resume };
+  state.rec = { recorder, audioRecorder, startTs: Date.now(), parentId, anchorMs, resume };
   recorder.start();
   audioRecorder.start();
+  updateStage();
   updateHint();
 }
 
@@ -433,8 +557,7 @@ function stopRecord() {
   if (!rec) return;
   rec.recorder.stop(); // uploadRecording fires once both recorders stop
   rec.audioRecorder.stop();
-  rec.stream.getTracks().forEach(t => t.stop());
-  preview.srcObject = null;
+  // the camera stream stays live — it's the always-on preview
   $('#rec-btn').classList.remove('recording');
 }
 
@@ -463,7 +586,7 @@ async function uploadRecording(videoBlob, audioBlob, rec) {
   }
   await poll();
   if (rec.resume) playFrom(rec.resume.msgId, rec.resume.atSec);
-  else hideStage();
+  else updateStage();
   updateHint();
 }
 
@@ -484,18 +607,22 @@ function updateHint(text) {
 }
 
 // ---------- stage (video area) ----------
-function showStage(mode, label = '') {
-  $('#stage').classList.remove('hidden');
-  const recMode = mode === 'record';
-  preview.classList.toggle('hidden', !recMode);
-  activeEl().classList.toggle('hidden', recMode);
+// modes: record → your camera fills the box; play → their video with your camera
+// as a corner PiP; self → idle, just your camera; none → no camera yet, hide stage
+function updateStage() {
+  const stage = $('#stage');
+  const box = $('#video-box');
+  const mode = state.rec ? 'record' : state.playing ? 'play' : camStream ? 'self' : 'none';
+  if (mode === 'none') { stage.classList.add('hidden'); return; }
+  stage.classList.remove('hidden');
+  box.classList.toggle('mode-play', mode === 'play');
+  box.classList.toggle('mode-record', mode === 'record');
+  preview.classList.toggle('hidden', !camStream);
+  activeEl().classList.toggle('hidden', mode !== 'play');
   standbyEl().classList.add('hidden');
-  $('#transport').classList.toggle('hidden', recMode);
-  $('#pip-label').textContent = recMode ? '● you' : label;
-}
-function hideStage() {
-  if (state.rec || state.playing) return;
-  $('#stage').classList.add('hidden');
+  $('#transport').classList.toggle('hidden', mode !== 'play');
+  $('#pip-label').textContent =
+    mode === 'record' ? '● you' : mode === 'play' ? state.playLabel : 'you';
 }
 
 // ---------- drag an interjection to move its split point ----------

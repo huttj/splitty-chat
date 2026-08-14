@@ -28,6 +28,7 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname } = url;
+    let m;
 
     try {
       if (pathname === '/api/chats' && request.method === 'POST') {
@@ -37,7 +38,70 @@ export default {
         return json({ id });
       }
 
-      let m;
+      // participant info for the landing page's "your chats" list
+      if (pathname === '/api/chats/lookup' && request.method === 'POST') {
+        const { ids } = await request.json();
+        if (!Array.isArray(ids)) return json({ error: 'bad request' }, 400);
+        const out = [];
+        for (const id of ids.slice(0, 30)) {
+          if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) continue;
+          const chat = await env.DB.prepare('SELECT id FROM chats WHERE id = ?').bind(id).first();
+          if (!chat) { out.push({ id, exists: false }); continue; }
+          const { results } = await env.DB
+            .prepare('SELECT author, COUNT(*) AS n, MAX(created_at) AS last FROM messages WHERE chat_id = ? GROUP BY author')
+            .bind(id).all();
+          out.push({
+            id,
+            exists: true,
+            participants: results.map(r => r.author),
+            count: results.reduce((a, r) => a + r.n, 0),
+            lastActivity: results.reduce((a, r) => Math.max(a, r.last || 0), 0) || null,
+          });
+        }
+        return json({ chats: out });
+      }
+
+      // ---- admin (password-protected) ----
+      if (pathname.startsWith('/api/admin/')) {
+        if (!env.ADMIN_PASSWORD) return json({ error: 'admin not configured' }, 503);
+        if (request.headers.get('Authorization') !== `Bearer ${env.ADMIN_PASSWORD}`) {
+          return json({ error: 'unauthorized' }, 401);
+        }
+      }
+
+      if (pathname === '/api/admin/chats' && request.method === 'GET') {
+        const { results: chats } = await env.DB.prepare(
+          `SELECT c.id, c.created_at, COUNT(m.id) AS n, MAX(m.created_at) AS last
+           FROM chats c LEFT JOIN messages m ON m.chat_id = c.id
+           GROUP BY c.id ORDER BY COALESCE(MAX(m.created_at), c.created_at) DESC`
+        ).all();
+        const { results: parts } = await env.DB
+          .prepare('SELECT DISTINCT chat_id, author FROM messages').all();
+        const byChat = {};
+        for (const p of parts) (byChat[p.chat_id] ??= []).push(p.author);
+        return json({
+          chats: chats.map(c => ({
+            id: c.id,
+            createdAt: c.created_at,
+            count: c.n,
+            lastActivity: c.last,
+            participants: byChat[c.id] || [],
+          })),
+        });
+      }
+
+      if ((m = pathname.match(/^\/api\/admin\/chats\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
+        const { results } = await env.DB
+          .prepare('SELECT video_key FROM messages WHERE chat_id = ?').bind(m[1]).all();
+        const keys = results.map(r => r.video_key);
+        for (let i = 0; i < keys.length; i += 1000) {
+          await env.MEDIA.delete(keys.slice(i, i + 1000));
+        }
+        await env.DB.prepare('DELETE FROM messages WHERE chat_id = ?').bind(m[1]).run();
+        await env.DB.prepare('DELETE FROM chats WHERE id = ?').bind(m[1]).run();
+        return json({ ok: true, deletedVideos: keys.length });
+      }
+
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)$/)) && request.method === 'GET') {
         const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
         if (!chat) return json({ error: 'not found' }, 404);
