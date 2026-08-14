@@ -159,14 +159,51 @@ function armCamRetry() {
   $('#cam-enable').onclick = e => { e.stopPropagation(); retry(); };
 }
 
+// wire the sign-in buttons inside the gate for a given return path
+function wireAuthBox(next) {
+  $('#name-form').classList.add('hidden');
+  $('#auth-box').classList.remove('hidden');
+  if (state.auth.providers.google) {
+    $('#google-btn').classList.remove('hidden');
+    $('#google-btn').href = `/auth/google?next=${encodeURIComponent(next)}`;
+  }
+  if (state.auth.providers.email) {
+    $('#email-form').classList.remove('hidden');
+    $('#email-form').onsubmit = async e => {
+      e.preventDefault();
+      const res = await fetch('/auth/email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: $('#email-input').value, next }),
+      });
+      $('#auth-note').textContent = (await res.json()).ok
+        ? 'Check your email — the link signs you in here.'
+        : "Couldn't send the email. Try again?";
+    };
+  }
+}
+
 // ---------- landing ----------
 function initLanding() {
   $('#landing').classList.remove('hidden');
   $('#create-chat').onclick = async () => {
+    if (state.auth?.authEnabled && !state.auth?.user) {
+      wireAuthBox('/');
+      $('#name-gate').classList.remove('hidden');
+      return;
+    }
     const res = await fetch('/api/chats', { method: 'POST' });
+    if (!res.ok) {
+      wireAuthBox('/');
+      $('#name-gate').classList.remove('hidden');
+      return;
+    }
     const { id } = await res.json();
     location.href = `/c/${id}`;
   };
+  $('#name-gate').addEventListener('click', e => {
+    if (e.target === $('#name-gate')) $('#name-gate').classList.add('hidden'); // landing gate is dismissible
+  });
   const recent = JSON.parse(localStorage.getItem('splitty:recent') || '[]');
   if (!recent.length) return;
   const box = $('#recent-chats');
@@ -485,27 +522,7 @@ function initChat() {
   const gateAuthMode = state.auth?.authEnabled && !state.auth?.user;
   $('#name-form').classList.toggle('hidden', gateAuthMode);
   $('#auth-box').classList.toggle('hidden', !gateAuthMode);
-  if (gateAuthMode) {
-    const next = encodeURIComponent(location.pathname);
-    if (state.auth.providers.google) {
-      $('#google-btn').classList.remove('hidden');
-      $('#google-btn').href = `/auth/google?next=${next}`;
-    }
-    if (state.auth.providers.email) {
-      $('#email-form').classList.remove('hidden');
-      $('#email-form').onsubmit = async e => {
-        e.preventDefault();
-        const res = await fetch('/auth/email', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email: $('#email-input').value, next: location.pathname }),
-        });
-        $('#auth-note').textContent = (await res.json()).ok
-          ? 'Check your email — the link signs you in here.'
-          : "Couldn't send the email. Try again?";
-      };
-    }
-  }
+  if (gateAuthMode) wireAuthBox(location.pathname);
   $('#name-form').onsubmit = e => {
     e.preventDefault();
     const v = $('#name-input').value.trim();

@@ -29,6 +29,16 @@
   "ai": {
     "binding": "AI"
   },
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true
+    }
+  ],
+  "vars": {
+    "EMAIL_FROM": "splitty <no-reply@splitty.chat>",
+    "ADMIN_EMAIL": "REDACTED"
+  },
   "observability": {
     "enabled": true
   }

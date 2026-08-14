@@ -21,7 +21,7 @@ const safePath = p => (p && p.startsWith('/') && !p.startsWith('//') ? p : '/');
 
 const providers = env => ({
   google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
-  email: !!(env.EMAIL_API_KEY && env.EMAIL_FROM),
+  email: !!(env.EMAIL && env.EMAIL_FROM),
 });
 // until at least one provider is configured, the app stays in legacy name-only mode
 const authEnabled = env => Object.values(providers(env)).some(Boolean);
@@ -42,14 +42,20 @@ async function createSession(env, userId) {
 }
 
 async function sendEmail(env, to, subject, html) {
-  if (!env.EMAIL_API_KEY || !env.EMAIL_FROM) return false;
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${env.EMAIL_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ from: env.EMAIL_FROM, to: [to], subject, html }),
-  });
-  if (!res.ok) console.error('sendEmail failed:', res.status, (await res.text()).slice(0, 200));
-  return res.ok;
+  if (!env.EMAIL || !env.EMAIL_FROM) return false;
+  try {
+    await env.EMAIL.send({
+      to,
+      from: env.EMAIL_FROM,
+      subject,
+      html,
+      text: html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+    });
+    return true;
+  } catch (err) {
+    console.error('sendEmail failed:', String(err));
+    return false;
+  }
 }
 
 // login/link resolution: an existing identity wins; otherwise attach to the
@@ -76,8 +82,8 @@ async function resolveUser(env, ctx, request, { provider, subject, email, name, 
     };
     await env.DB.prepare('INSERT INTO users (id, name, email, status, created_at) VALUES (?, ?, ?, ?, ?)')
       .bind(user.id, user.name, user.email, user.status, Date.now()).run();
-    if (env.ADMIN_EMAIL) {
-      ctx.waitUntil(sendEmail(env, env.ADMIN_EMAIL, `${user.name} just joined splitty.chat`,
+    for (const admin of (env.ADMIN_EMAIL || '').split(',').map(s => s.trim()).filter(Boolean)) {
+      ctx.waitUntil(sendEmail(env, admin, `${user.name} just joined splitty.chat`,
         `<p><b>${user.name}</b> (${user.email || provider}) just signed up. They can send one message until approved.</p>
          <p><a href="${origin}/admin">Approve or block them</a></p>`));
     }
@@ -223,6 +229,11 @@ export default {
       }
 
       if (pathname === '/api/chats' && request.method === 'POST') {
+        if (authEnabled(env)) {
+          const user = await getUser(request, env);
+          if (!user) return json({ error: 'sign in to create a chat', code: 'auth' }, 401);
+          if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+        }
         const id = slug(12);
         await env.DB.prepare('INSERT INTO chats (id, created_at) VALUES (?, ?)')
           .bind(id, Date.now()).run();
