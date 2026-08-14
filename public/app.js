@@ -603,25 +603,38 @@ function focusWordAt(seg, t, cls) {
   const msg = state.byId.get(seg.id);
   if (!msg || !msg.words.length) return;
   let i = msg.words.findIndex(w => t < w.e);
-  if (i === -1) i = msg.words.length - 1;
-  const w = msg.words[i];
+  let selector = null, f = 0, gi = -1;
 
-  // inside a pause before word i? glow the gap element to the same standard
-  let selector, f;
-  if (t < w.s && i > 0) {
-    const prevEnd = msg.words[i - 1].e;
-    const gapEl = document.querySelector(`.gap[data-mid="${seg.id}"][data-gi="${i}"]`);
-    if (gapEl) {
+  if (i === -1) {
+    // past the last word — trailing silence if one is rendered
+    i = msg.words.length - 1;
+    const lastEnd = msg.words[i].e;
+    const gapEl = document.querySelector(`.gap[data-mid="${seg.id}"][data-gi="${msg.words.length}"]`);
+    if (gapEl && t >= lastEnd) {
       selector = gapEl;
-      f = w.s > prevEnd ? (t - prevEnd) / (w.s - prevEnd) : 0;
+      gi = msg.words.length;
+      const dur = msgDur(msg);
+      f = dur > lastEnd ? (t - lastEnd) / (dur - lastEnd) : 1;
+    } else {
+      f = 1;
     }
-  }
-  if (!selector) {
-    f = w.e > w.s ? (t - w.s) / (w.e - w.s) : 0;
+  } else {
+    const w = msg.words[i];
+    if (t < w.s) {
+      // inside the pause before word i (i=0 covers leading silence)
+      const prevEnd = i > 0 ? msg.words[i - 1].e : 0;
+      const gapEl = document.querySelector(`.gap[data-mid="${seg.id}"][data-gi="${i}"]`);
+      if (gapEl) {
+        selector = gapEl;
+        gi = i;
+        f = w.s > prevEnd ? (t - prevEnd) / (w.s - prevEnd) : 0;
+      }
+    }
+    if (!selector) f = w.e > w.s ? (t - w.s) / (w.e - w.s) : 0;
   }
   f = Math.min(Math.max(f, 0), 1);
 
-  const key = selector ? `${cls}:gap:${seg.id}:${i}` : `${cls}:${seg.id}:${i}`;
+  const key = selector ? `${cls}:gap:${seg.id}:${gi}` : `${cls}:${seg.id}:${i}`;
   let span = lastFocus.key === key && lastFocus.span?.isConnected ? lastFocus.span : null;
   if (!span) {
     span = selector || document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`);
@@ -1054,24 +1067,27 @@ function renderMessage(msg, depth) {
   // interleave words with interjections, split at each anchor
   const kids = childrenOf(msg.id);
   let wi = 0;
+  // audible silences render as widening dotted gaps (gi = index of the word after the pause)
+  const makeGap = (prevEnd, nextStart, gi) => {
+    const gapSec = nextStart - prevEnd;
+    if (gapSec < 0.4) return null;
+    const g = document.createElement('span');
+    g.className = 'gap';
+    g.dataset.mid = msg.id;
+    g.dataset.gi = gi;
+    g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
+    g.title = `${gapSec.toFixed(1)}s pause`;
+    g.onclick = () => playFrom(msg.id, prevEnd + 0.01);
+    return g;
+  };
   const flushWordsUntil = untilSec => {
     const frag = document.createDocumentFragment();
     while (wi < msg.words.length && (untilSec == null || msg.words[wi].s < untilSec)) {
       const w = msg.words[wi];
-      // render audible silences as widening dotted gaps
-      if (wi > 0) {
-        const prevEnd = msg.words[wi - 1].e;
-        const gapSec = w.s - prevEnd;
-        if (gapSec >= 0.4) {
-          const g = document.createElement('span');
-          g.className = 'gap';
-          g.dataset.mid = msg.id;
-          g.dataset.gi = wi; // the pause before word wi
-          g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
-          g.title = `${gapSec.toFixed(1)}s pause`;
-          g.onclick = () => playFrom(msg.id, prevEnd + 0.01);
-          frag.appendChild(g);
-        }
+      const gap = makeGap(wi > 0 ? msg.words[wi - 1].e : 0, w.s, wi); // wi=0: leading silence
+      if (gap) {
+        frag.appendChild(gap);
+        frag.appendChild(document.createTextNode(' ')); // match the space after words — keeps the pill centered between neighbors
       }
       const span = document.createElement('span');
       span.className = 'word' + (!mine && w.s * 1000 > seenMs ? ' unseen' : '');
@@ -1092,6 +1108,13 @@ function renderMessage(msg, depth) {
     body.appendChild(renderMessage(kid, depth + 1));
   }
   body.appendChild(flushWordsUntil(null));
+
+  // trailing silence after the last word, out to the recording's end
+  if (msg.words.length) {
+    const lastEnd = msg.words[msg.words.length - 1].e;
+    const tail = makeGap(lastEnd, msgDur(msg), msg.words.length);
+    if (tail) body.appendChild(tail);
+  }
 
   card.appendChild(body);
   return card;

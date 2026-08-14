@@ -254,15 +254,17 @@ body.dragging-anchor .word { cursor: grabbing; }
 .word:hover { background: var(--accent-soft); }
 /* silences between words, width scaled to the pause length; tap to play from the pause */
 .gap {
-  display: inline-block; height: 8px; vertical-align: middle;
-  border-bottom: 2px dotted #454b5e; margin: 0 4px 3px; cursor: pointer;
+  display: inline-block; height: 13px; vertical-align: middle;
+  margin: 0 2px; cursor: pointer; border-radius: 7px;
+  background: repeating-linear-gradient(90deg, #454b5e 0 3px, transparent 3px 7px) center / 100% 2px no-repeat;
 }
-.gap:hover { border-color: var(--accent); }
+.gap:hover {
+  background: repeating-linear-gradient(90deg, var(--accent) 0 3px, transparent 3px 7px) center / 100% 2px no-repeat;
+}
 /* the playhead inside a pause: same baseline wash + sliding hotspot as words */
 .gap.speaking,
 .gap.scrub-focus {
-  border-color: transparent;
-  border-radius: 3px;
+  border-radius: 7px;
   background:
     linear-gradient(90deg,
       transparent calc(var(--f, 50%) - 28%),
