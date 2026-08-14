@@ -9,6 +9,8 @@ const slug = (n = 12) => {
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
 
+const sameAuthor = (a, b) => (a || '').trim().toLowerCase() === (b || '').trim().toLowerCase();
+
 const rowToMessage = r => ({
   id: r.id,
   chatId: r.chat_id,
@@ -127,7 +129,7 @@ export default {
         if (!row) return json({ error: 'not found' }, 404);
         if (!row.parent_id) return json({ error: 'not an interjection' }, 400);
         const body = await request.json();
-        if (body.author !== row.author) return json({ error: 'only the author can move this' }, 403);
+        if (!sameAuthor(body.author, row.author)) return json({ error: 'only the author can move this' }, 403);
         const anchorMs = Math.max(0, Math.round(Number(body.anchorMs) || 0));
         await env.DB.prepare('UPDATE messages SET anchor_ms = ? WHERE id = ?').bind(anchorMs, m[2]).run();
         return json({ ok: true, anchorMs });
@@ -140,7 +142,7 @@ export default {
           .bind(m[2], m[1]).first();
         if (!row) return json({ error: 'not found' }, 404);
         const body = await request.json();
-        if (body.author !== row.author) return json({ error: 'only the author can delete this' }, 403);
+        if (!sameAuthor(body.author, row.author)) return json({ error: 'only the author can delete this' }, 403);
         if (row.parent_id) {
           await env.DB.prepare('UPDATE messages SET parent_id = ?, anchor_ms = ? WHERE parent_id = ?')
             .bind(row.parent_id, row.anchor_ms, m[2]).run();

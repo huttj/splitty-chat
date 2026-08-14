@@ -23,6 +23,11 @@ const state = {
   lastRenderKey: '',
 };
 
+// name comparison is forgiving about case/whitespace so "Josh " on your phone
+// still owns what "josh" recorded on your laptop
+const normName = s => (s || '').trim().toLowerCase();
+const isMine = author => normName(author) === normName(state.name);
+
 const USER_COLORS = ['#7c5cff', '#4dc9b0', '#e08bff', '#ffa94d', '#5db3ff', '#ff6b9d', '#9ee36b', '#ffd166'];
 function colorFor(name) {
   let h = 0;
@@ -177,7 +182,7 @@ function initLanding() {
         const row = rows.get(c.id);
         if (!row) continue;
         if (!c.exists) { row.remove(); gone.push(c.id); continue; }
-        const others = (c.participants || []).filter(n => n !== state.name);
+        const others = (c.participants || []).filter(n => !isMine(n));
         row.querySelector('.rc-names').textContent =
           others.length ? `with ${others.join(', ')}` : c.count ? 'just you so far' : 'empty chat';
         row.querySelector('.rc-meta').textContent = `${c.count} note${c.count === 1 ? '' : 's'}`;
@@ -185,7 +190,7 @@ function initLanding() {
         const seen = JSON.parse(localStorage.getItem(`splitty:seen:${c.id}`) || '{}');
         let unreadMs = 0;
         for (const msg of c.messages || []) {
-          if (msg.author === state.name) continue;
+          if (isMine(msg.author)) continue;
           const dur = msg.durationMs || 0;
           const remaining = dur - Math.min(seen[msg.id] || 0, dur);
           if (remaining > 1000) unreadMs += remaining;
@@ -402,20 +407,31 @@ function initChat() {
     applyFit();
   };
 
-  if (!state.name) {
-    $('#name-gate').classList.remove('hidden');
-    $('#name-form').onsubmit = e => {
-      e.preventDefault();
-      state.name = $('#name-input').value.trim();
-      if (!state.name) return;
-      localStorage.setItem('splitty:name', state.name);
-      $('#name-gate').classList.add('hidden');
-      ensureCam().catch(armCamRetry);
-    };
-  } else {
-    // camera warms up immediately so recording is instant; stage shows you while idle
+  // name gate doubles as the change-name dialog (header button reopens it)
+  $('#name-form').onsubmit = e => {
+    e.preventDefault();
+    const v = $('#name-input').value.trim();
+    if (!v) return;
+    state.name = v;
+    localStorage.setItem('splitty:name', v);
+    $('#name-gate').classList.add('hidden');
+    $('#name-btn').textContent = v;
+    state.lastRenderKey = '';
+    render();
     ensureCam().catch(armCamRetry);
-  }
+  };
+  $('#name-gate').addEventListener('click', e => {
+    if (e.target === $('#name-gate') && state.name) $('#name-gate').classList.add('hidden');
+  });
+  const openNameGate = () => {
+    $('#name-input').value = state.name;
+    $('#name-gate').classList.remove('hidden');
+    $('#name-input').focus();
+  };
+  $('#name-btn').textContent = state.name || 'Set name';
+  $('#name-btn').onclick = openNameGate;
+  if (!state.name) openNameGate();
+  else ensureCam().catch(armCamRetry); // camera warms up immediately so recording is instant
 
   // remember this chat on the landing page
   const recent = JSON.parse(localStorage.getItem('splitty:recent') || '[]')
@@ -454,7 +470,7 @@ function cueFirstUnheard() {
   for (let i = 0; i < state.playlist.length; i++) {
     const seg = state.playlist[i];
     const msg = state.byId.get(seg.id);
-    if (!msg || msg.author === state.name) continue; // your own words are always "heard"
+    if (!msg || isMine(msg.author)) continue; // your own words are always "heard"
     const seenSec = (state.seen[seg.id] || 0) / 1000;
     if (seenSec < seg.end - 0.3) {
       idx = i;
@@ -1130,7 +1146,7 @@ function render() {
 
 function renderMessage(msg, depth) {
   const seenMs = state.seen[msg.id] || 0;
-  const mine = msg.author === state.name;
+  const mine = isMine(msg.author);
   const isNew = !mine && (msg.words.length ? msg.words.some(w => w.s * 1000 > seenMs) : seenMs === 0);
 
   const card = document.createElement('div');

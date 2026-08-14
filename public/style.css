@@ -93,6 +93,7 @@ body {
   padding: 12px 16px; border-bottom: 1px solid #22252f; flex-shrink: 0;
 }
 .logo { font-weight: 700; color: var(--text); text-decoration: none; letter-spacing: -0.5px; }
+.header-actions { display: flex; gap: 8px; }
 
 #messages { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 16px 16px 120px; } /* room for the floating record button */
 .empty { color: var(--muted); text-align: center; margin-top: 15vh; }
@@ -212,7 +213,7 @@ body {
 /* ---------- messages ---------- */
 .msg {
   background: var(--panel);
-  border-radius: 3px 10px 10px 3px; /* near-square on the colored edge, soft on the right */
+  border-radius: 0 10px 10px 0; /* square colored edge — the stripe stays a perfect rectangle */
   padding: 12px 14px;
   margin-bottom: 14px; border: 1px solid transparent;
   box-shadow: inset 3px 0 0 var(--author-color, transparent); /* speaker stripe, flush and straight */

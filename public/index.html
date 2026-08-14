@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=28">
+  <link rel="stylesheet" href="/style.css?v=29">
 </head>
 <body>
 
@@ -22,7 +22,10 @@
   <div id="chat" class="hidden">
     <header id="chat-header">
       <a href="/" class="logo">splitty</a>
-      <button id="copy-link" class="btn-ghost">Copy invite link</button>
+      <div class="header-actions">
+        <button id="name-btn" class="btn-ghost" title="Change your display name"></button>
+        <button id="copy-link" class="btn-ghost">Copy invite link</button>
+      </div>
     </header>
 
     <div id="stage" class="hidden">
@@ -98,6 +101,6 @@
     </form>
   </div>
 
-  <script src="/app.js?v=28"></script>
+  <script src="/app.js?v=29"></script>
 </body>
 </html>
