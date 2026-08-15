@@ -720,10 +720,18 @@ const childrenOf = id =>
   state.messages.filter(m => m.parentId === id).sort((a, b) => (a.anchorMs - b.anchorMs) || (a.createdAt - b.createdAt));
 
 function msgDur(msg) {
-  if (msg.durationMs) return msg.durationMs / 1000;
-  if (msg.words.length) return msg.words[msg.words.length - 1].e + 0.6;
-  return 3;
+  // wall-clock durationMs can undercount the real file (recorder start skew),
+  // so the last word's timestamp extends it — never cut a clip mid-word
+  const fromWords = msg.words.length ? msg.words[msg.words.length - 1].e + 0.3 : 0;
+  if (msg.durationMs) return Math.max(msg.durationMs / 1000, fromWords);
+  return fromWords || 3;
 }
+
+// is this segment the final chunk of its message's file?
+const isTailSeg = seg => {
+  const msg = state.byId.get(seg.id);
+  return !!msg && seg.end >= msgDur(msg) - 0.03;
+};
 
 // An anchor that lands inside a word snaps just past the word's end — cuts
 // never happen mid-word, playback order matches the transcript split, and the
@@ -831,6 +839,13 @@ function playFrom(msgId, atSec) {
   playSegment(idx, Math.max(atSec, state.playlist[idx].start));
 }
 
+const safePlay = el => el.play()?.catch(() => {
+  // mobile rejects plays that race a load — one retry covers the transient case
+  setTimeout(() => {
+    if (state.playing && el === activeEl() && el.paused) el.play().catch(() => {});
+  }, 120);
+});
+
 function playSegment(idx, offset, autoplay = true) {
   const seg = state.playlist[idx];
   const msg = state.byId.get(seg.id);
@@ -841,16 +856,30 @@ function playSegment(idx, offset, autoplay = true) {
   const at = offset != null ? offset : seg.start;
   const stb = standbyEl();
 
-  if (offset == null && stb._preparedKey === segKey(seg) && stb.readyState >= 2) {
-    // seamless handoff: the standby element is already loaded and parked at seg.start
-    activeEl().pause();
+  if (offset == null && stb._preparedKey === segKey(seg) && stb.readyState >= 1) {
+    // handoff: the standby is parked (or already running muted via overlap launch)
+    const old = activeEl();
     state.activeIdx ^= 1;
-    if (autoplay) activeEl().play();
+    const el = activeEl();
+    el._preparedKey = null; // used up — never trust this park position again
+    old.pause();
+    if (el._launched) {
+      el._launched = false;
+      if (Math.abs(el.currentTime - seg.start) > 0.2) el.currentTime = seg.start;
+    } else {
+      el.currentTime = seg.start; // parked early for overlap — snap to the real start
+    }
+    el.muted = false;
+    if (autoplay) { if (el.paused) safePlay(el); }
+    else el.pause();
   } else {
     const el = activeEl();
+    el._preparedKey = null;
+    el._launched = false;
+    el.muted = false;
     if (el.src === src) {
       el.currentTime = at;
-      autoplay ? el.play() : el.pause();
+      autoplay ? safePlay(el) : el.pause();
     } else {
       el._pendingSeek = at;
       el._autoplay = autoplay;
@@ -872,7 +901,10 @@ function playSegment(idx, offset, autoplay = true) {
 
 const segKey = seg => `${seg.id}@${seg.start.toFixed(3)}`;
 
-// Park the *other* video element on the next segment so the switch is instant.
+// Park the *other* video element just ahead of the next segment. The frame
+// ticker launches it muted LEAD seconds before the boundary, so by swap time
+// it's already rendering — pause/play startup latency never shows.
+const LEAD = 0.25;
 function prepareNext(idx) {
   const nseg = state.playlist[idx + 1];
   const stb = standbyEl();
@@ -880,13 +912,16 @@ function prepareNext(idx) {
   const nmsg = state.byId.get(nseg.id);
   if (!nmsg) return;
   const key = segKey(nseg);
-  if (stb._preparedKey === key) return;
+  if (stb._preparedKey === key && !stb._launched) return;
+  const parkAt = Math.max(0, nseg.start - LEAD);
   const nsrc = mediaUrl(nmsg);
   stb._autoplay = false;
+  stb._launched = false;
+  stb.pause();
   if (stb.src === nsrc && stb.readyState >= 1) {
-    stb.currentTime = nseg.start;
+    stb.currentTime = parkAt;
   } else {
-    stb._pendingSeek = nseg.start;
+    stb._pendingSeek = parkAt;
     stb.preload = 'auto';
     stb.src = nsrc;
   }
@@ -1018,9 +1053,25 @@ function tickHighlight() {
   const el = activeEl();
   const seg = state.playlist[state.playIdx];
   if (!seg) return;
-  // frame-rate boundary enforcement: cut to the next segment within ~16ms of
-  // the splice point, instead of overshooting by a whole timeupdate interval
-  if (!el.paused && el.currentTime >= seg.end - 0.015) return advanceSegment(state.playIdx);
+  if (!el.paused) {
+    const remain = (seg.end - el.currentTime) / (state.speed || 1);
+    // frame-rate boundary enforcement: cut within ~16ms of the splice point.
+    // File-end segments are exempt — the 'ended' event is the truth there,
+    // since estimated duration can undershoot the real file.
+    if (remain <= 0.015 && !isTailSeg(seg)) return advanceSegment(state.playIdx);
+    // overlap launch: run the standby muted through the boundary so the swap
+    // reveals an already-playing video instead of paying play() startup cost
+    if (remain <= LEAD) {
+      const nseg = state.playlist[state.playIdx + 1];
+      const stb = standbyEl();
+      if (nseg && !stb._launched && stb._preparedKey === segKey(nseg) && stb.readyState >= 1) {
+        stb._launched = true;
+        stb.muted = true;
+        stb.playbackRate = state.speed;
+        stb.play().catch(() => { stb._launched = false; });
+      }
+    }
+  }
   focusWordAt(seg, el.currentTime, 'speaking');
 }
 requestAnimationFrame(tickHighlight);
@@ -1072,7 +1123,8 @@ function onTimeUpdate() {
   const seg = state.playlist[state.playIdx];
   const t = activeEl().currentTime;
 
-  if (t >= seg.end - 0.05) return advanceSegment(state.playIdx); // fallback; the frame ticker cuts tighter
+  // fallback boundary check (frame ticker cuts tighter); file ends advance via 'ended'
+  if (t >= seg.end - 0.05 && !isTailSeg(seg)) return advanceSegment(state.playIdx);
 
   $('#scrubber').value = currentVT();
   updateTimeLabel(currentVT());
