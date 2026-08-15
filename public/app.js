@@ -1140,10 +1140,26 @@ function focusWordAt(seg, t, cls) {
       el.style.removeProperty('--f');
     });
     span.classList.add(cls);
-    span.scrollIntoView({ block: 'nearest' });
+    // Follow the live highlight only while it's on screen. Scroll it out of
+    // view and reading stays put; it re-attaches once the highlight is back in
+    // view — because you scrolled to it, or playback caught up to where you
+    // are. Scrub focus always follows (you're actively steering there).
+    if (cls !== 'speaking' || highlightOnScreen(span)) span.scrollIntoView({ block: 'nearest' });
     lastFocus = { key, span };
   }
   span.style.setProperty('--f', `${(f * 100).toFixed(1)}%`);
+}
+
+// Is the spoken-word highlight inside the transcript viewport? A couple of
+// lines of grace below the fold, so the word that just crossed the bottom
+// edge still counts as visible and gets pinned — that's what makes playback
+// keep the highlight at the bottom instead of detaching the moment it exits.
+// No grace above: if you scrolled down past it, it stays detached.
+function highlightOnScreen(span) {
+  const box = $('#messages').getBoundingClientRect();
+  const r = span.getBoundingClientRect();
+  const line = r.height || 24;
+  return r.bottom > box.top && r.top < box.bottom + 2.5 * line;
 }
 
 // while dragging the scrubber
