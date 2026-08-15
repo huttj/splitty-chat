@@ -504,8 +504,10 @@ function initChat() {
         advanceSegment();
       }
     });
-    el.addEventListener('play', e => e.target === activeEl() && $('#btn-play').classList.add('playing'));
-    el.addEventListener('pause', e => e.target === activeEl() && $('#btn-play').classList.remove('playing'));
+    // any play/pause on either element re-derives the button from the active
+    // one — during boundary handoffs events fire on both, in racy orders
+    el.addEventListener('play', syncPlayButton);
+    el.addEventListener('pause', syncPlayButton);
     el.addEventListener('loadedmetadata', e => {
       const v = e.target;
       if (v._pendingSeek != null) {
@@ -812,8 +814,16 @@ function cueAt(idx, at, autoplay = false) {
   const vt = seg.vStart + (at - seg.start);
   $('#scrubber').value = vt;
   updateTimeLabel(vt);
-  $('#btn-play').classList.remove('playing');
+  syncPlayButton();
   updateHint();
+}
+
+// single source of truth for the transport play/pause button: the session is
+// live AND the on-screen element is actually running. Overlap handoffs swap in
+// an already-playing element that never fires a fresh 'play' event, so the
+// button must be derived, not event-toggled.
+function syncPlayButton() {
+  $('#btn-play').classList.toggle('playing', state.playing && !activeEl().paused);
 }
 
 // ---------- message tree ----------
@@ -1000,6 +1010,7 @@ function playSegment(idx, offset, autoplay = true) {
   );
   state.playLabel = msg.author;
   updateStage();
+  syncPlayButton();
   updateHint();
 }
 
@@ -1047,6 +1058,7 @@ function stopPlayback() {
   for (const el of players) { el.pause(); el._preparedKey = null; }
   updateStage();
   clearWordHighlight();
+  syncPlayButton();
   updateHint();
 }
 
