@@ -394,3 +394,81 @@ body.hide-gaps .gap { display: none; }
 .st-approved { background: rgba(77, 201, 176, 0.18); color: #4dc9b0; }
 .st-pending { background: rgba(255, 209, 102, 0.18); color: var(--new); }
 .st-blocked { background: rgba(255, 77, 94, 0.18); color: var(--rec); }
+
+/* ---------- sharing & access ---------- */
+#locked, #invite-page {
+  display: flex; height: 100dvh; overflow-y: auto;
+  align-items: center; justify-content: center; padding: 24px; text-align: center;
+}
+#locked .btn-primary, #invite-page .btn-primary { margin-bottom: 12px; }
+#invite-page .btn-primary, #invite-watch { display: inline-block; text-decoration: none; }
+#invite-watch { margin-left: 8px; }
+.locked-home { margin-top: 18px; }
+.locked-home a { color: var(--muted); text-decoration: none; }
+#locked-note { max-width: 320px; margin: 0 auto; }
+
+#share-gate {
+  position: fixed; inset: 0; z-index: 100; background: rgba(10, 11, 15, 0.85);
+  backdrop-filter: blur(8px); display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+#share-card {
+  background: var(--panel); border-radius: 18px; max-width: 440px; width: 100%;
+  max-height: min(640px, 90dvh); display: flex; flex-direction: column;
+}
+#share-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 22px 0;
+}
+#share-body { overflow-y: auto; padding: 6px 22px 22px; }
+#share-body h3 {
+  color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+  margin: 18px 0 8px;
+}
+.share-note { font-size: 12.5px; line-height: 1.45; margin-bottom: 10px; }
+#vis-row {
+  display: flex; gap: 12px; align-items: flex-start; cursor: pointer;
+  background: var(--panel-2); border-radius: 12px; padding: 12px 14px; margin: 12px 0;
+  font-size: 14px; line-height: 1.35; text-align: left;
+}
+#vis-row input { margin-top: 3px; accent-color: var(--accent); }
+#vis-row small { font-size: 12px; }
+#share-copy { width: 100%; text-align: center; }
+
+.share-row {
+  display: flex; align-items: center; gap: 10px; padding: 7px 0;
+  font-size: 14px; min-width: 0;
+}
+.share-row .avatar { width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; }
+.share-row .sr-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.share-row .sr-sub { display: block; color: var(--muted); font-size: 12px; }
+.share-row select, #invite-role {
+  background: var(--panel-2); color: var(--text); border: 1px solid #2e3342;
+  border-radius: 8px; padding: 5px 8px; font-size: 13px; max-width: 100%;
+}
+.share-row .btn-ghost, .share-row .btn-danger { flex-shrink: 0; padding: 4px 10px; font-size: 13px; }
+.owner-pill {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+  padding: 2px 7px; border-radius: 99px; background: var(--accent-soft); color: var(--accent);
+  flex-shrink: 0;
+}
+#invite-form input[type="text"] {
+  width: 100%; padding: 10px 12px; border-radius: 10px; margin-bottom: 8px;
+  border: 1px solid #2e3342; background: var(--bg); color: var(--text); font-size: 15px;
+}
+.invite-row { display: flex; gap: 8px; }
+.invite-row select { flex: 1; min-width: 0; }
+.invite-row .btn-primary { flex-shrink: 0; padding: 8px 14px; font-size: 14px; }
+.invite-link-row {
+  display: flex; gap: 8px; align-items: center; background: var(--panel-2);
+  border-radius: 10px; padding: 8px 10px; margin-top: 10px;
+}
+.invite-link-row input {
+  flex: 1; min-width: 0; background: none; border: 0; color: var(--accent);
+  font-size: 13px; font-family: ui-monospace, monospace;
+}
+
+/* viewers: watch-only — no record controls */
+body.role-viewer #controls { display: none; }
+body.role-viewer #splitter { bottom: 0; }
+
+#bell-btn.bell-on { color: var(--accent); }

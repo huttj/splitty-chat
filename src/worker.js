@@ -111,12 +111,68 @@ const isAdmin = (env, user) =>
   (env.ADMIN_EMAIL || '').toLowerCase().split(',').map(s => s.trim()).includes(user.email.toLowerCase());
 
 // account-stamped messages belong to the account; legacy rows fall back to name match
-async function ownsMessage(request, env, row, claimedAuthor) {
-  if (row.user_id) {
-    const user = await getUser(request, env);
-    return !!user && user.id === row.user_id;
+const ownsMessage = (user, row, claimedAuthor) =>
+  row.user_id ? !!user && user.id === row.user_id : sameAuthor(claimedAuthor, row.author);
+
+// ---------- roles & chat access ----------
+// editor: reorder/delete anything, invite people, flip visibility
+// commenter: record + move their own messages
+// viewer: watch only
+const ROLE_RANK = { viewer: 1, commenter: 2, editor: 3 };
+const roleAtLeast = (role, min) => (ROLE_RANK[role] || 0) >= ROLE_RANK[min];
+const validRole = r => Object.hasOwn(ROLE_RANK, r);
+
+// Resolve what `user` may do in `chat`. role === null means no access at all.
+// An unconsumed invite token grants read-only viewing (the "peek before you
+// sign up" path); consuming it is a separate explicit step.
+async function chatAccess(env, user, chat, inviteToken) {
+  if (!authEnabled(env)) return { user, role: 'editor', isOwner: true }; // name-only dev mode stays open
+  if (user?.status === 'blocked') return { user, role: null, isOwner: false };
+  if (user && isAdmin(env, user)) return { user, role: 'editor', isOwner: user.id === chat.owner_id };
+  if (!chat.owner_id) {
+    // legacy chat from before access control — open like it always was
+    return { user, role: user ? 'commenter' : 'viewer', isOwner: false };
   }
-  return sameAuthor(claimedAuthor, row.author);
+  if (user) {
+    if (user.id === chat.owner_id) return { user, role: 'editor', isOwner: true };
+    const mem = await env.DB.prepare('SELECT role FROM chat_members WHERE chat_id = ? AND user_id = ?')
+      .bind(chat.id, user.id).first();
+    if (mem) return { user, role: mem.role, isOwner: false };
+  }
+  if ((chat.visibility || 'private') === 'public') return { user, role: 'viewer', isOwner: false };
+  if (inviteToken) {
+    const inv = await env.DB.prepare('SELECT used_by FROM invites WHERE token = ? AND chat_id = ?')
+      .bind(inviteToken, chat.id).first();
+    if (inv && !inv.used_by) return { user, role: 'viewer', isOwner: false, viaInvite: true };
+  }
+  return { user, role: null, isOwner: false };
+}
+
+// everyone who should see editor-level alerts for a chat (owner + editors)
+async function chatEditorIds(env, chat) {
+  const { results } = await env.DB.prepare(
+    "SELECT user_id FROM chat_members WHERE chat_id = ? AND role = 'editor'").bind(chat.id).all();
+  const ids = new Set(results.map(r => r.user_id));
+  if (chat.owner_id) ids.add(chat.owner_id);
+  return [...ids];
+}
+
+// add (or upgrade) a member, clear any pending access request, tell them
+async function addMember(env, chat, userId, role, addedBy) {
+  await env.DB.prepare(
+    'INSERT INTO chat_members (chat_id, user_id, role, added_by, created_at) VALUES (?, ?, ?, ?, ?) ' +
+    'ON CONFLICT (chat_id, user_id) DO UPDATE SET role = excluded.role, added_by = excluded.added_by'
+  ).bind(chat.id, userId, role, addedBy?.id || null, Date.now()).run();
+  await env.DB.prepare('DELETE FROM access_requests WHERE chat_id = ? AND user_id = ?')
+    .bind(chat.id, userId).run();
+  if (addedBy && addedBy.id !== userId) {
+    await pushToUsers(env, [userId], {
+      title: 'splitty',
+      body: `${addedBy.name} added you to a chat as ${role}`,
+      url: `/c/${chat.id}`,
+      tag: `chat-${chat.id}`,
+    });
+  }
 }
 
 const rowToMessage = r => ({
@@ -146,7 +202,13 @@ export default {
       // ---- auth routes ----
       if (pathname === '/api/me' && request.method === 'GET') {
         const user = await getUser(request, env);
-        return json({ user, providers: providers(env), authEnabled: authEnabled(env), isAdmin: isAdmin(env, user) });
+        return json({
+          user,
+          providers: providers(env),
+          authEnabled: authEnabled(env),
+          isAdmin: isAdmin(env, user),
+          pushKey: pushEnabled(env) ? vapidPublicKey(env) : null,
+        });
       }
 
       if (pathname === '/auth/logout' && request.method === 'POST') {
@@ -248,14 +310,21 @@ export default {
       }
 
       if (pathname === '/api/chats' && request.method === 'POST') {
+        let user = null;
         if (authEnabled(env)) {
-          const user = await getUser(request, env);
+          user = await getUser(request, env);
           if (!user) return json({ error: 'sign in to create a chat', code: 'auth' }, 401);
           if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
         }
         const id = slug(12);
-        await env.DB.prepare('INSERT INTO chats (id, created_at) VALUES (?, ?)')
-          .bind(id, Date.now()).run();
+        // private by default; the creator is the owner and an editor-member
+        await env.DB.prepare("INSERT INTO chats (id, created_at, owner_id, visibility) VALUES (?, ?, ?, 'private')")
+          .bind(id, Date.now(), user?.id || null).run();
+        if (user) {
+          await env.DB.prepare(
+            "INSERT INTO chat_members (chat_id, user_id, role, added_by, created_at) VALUES (?, ?, 'editor', ?, ?)"
+          ).bind(id, user.id, user.id, Date.now()).run();
+        }
         return json({ id });
       }
 
@@ -263,11 +332,16 @@ export default {
       if (pathname === '/api/chats/lookup' && request.method === 'POST') {
         const { ids } = await request.json();
         if (!Array.isArray(ids)) return json({ error: 'bad request' }, 400);
+        const lookupUser = await getUser(request, env);
         const out = [];
         for (const id of ids.slice(0, 30)) {
           if (typeof id !== 'string' || !/^[A-Za-z0-9_-]+$/.test(id)) continue;
-          const chat = await env.DB.prepare('SELECT id FROM chats WHERE id = ?').bind(id).first();
+          const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(id).first();
           if (!chat) { out.push({ id, exists: false }); continue; }
+          if (!(await chatAccess(env, lookupUser, chat)).role) {
+            out.push({ id, exists: true, private: true });
+            continue;
+          }
           const { results } = await env.DB
             .prepare('SELECT id, author, duration_ms, created_at FROM messages WHERE chat_id = ?')
             .bind(id).all();
@@ -345,6 +419,9 @@ export default {
           await env.MEDIA.delete(keys.slice(i, i + 1000));
         }
         await env.DB.prepare('DELETE FROM messages WHERE chat_id = ?').bind(m[1]).run();
+        await env.DB.prepare('DELETE FROM chat_members WHERE chat_id = ?').bind(m[1]).run();
+        await env.DB.prepare('DELETE FROM invites WHERE chat_id = ?').bind(m[1]).run();
+        await env.DB.prepare('DELETE FROM access_requests WHERE chat_id = ?').bind(m[1]).run();
         await env.DB.prepare('DELETE FROM chats WHERE id = ?').bind(m[1]).run();
         return json({ ok: true, deletedVideos: keys.length });
       }
@@ -352,42 +429,291 @@ export default {
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)$/)) && request.method === 'GET') {
         const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
         if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat, url.searchParams.get('invite'));
+        if (!access.role) {
+          if (!user) return json({ error: 'sign in to view this chat', code: 'auth' }, 401);
+          const req = await env.DB.prepare('SELECT 1 AS x FROM access_requests WHERE chat_id = ? AND user_id = ?')
+            .bind(chat.id, user.id).first();
+          return json({ error: 'this chat is private', code: 'private', requested: !!req }, 403);
+        }
         const { results } = await env.DB
           .prepare(`SELECT msg.*, u.picture FROM messages msg
                     LEFT JOIN users u ON u.id = msg.user_id
                     WHERE msg.chat_id = ? ORDER BY msg.created_at`)
           .bind(m[1]).all();
-        return json({
-          chat: { id: chat.id, createdAt: chat.created_at },
+        const payload = {
+          chat: { id: chat.id, createdAt: chat.created_at, visibility: chat.visibility || 'private', ownerId: chat.owner_id },
+          myRole: access.role,
+          isOwner: !!access.isOwner,
+          viaInvite: !!access.viaInvite,
           messages: results.map(rowToMessage),
+        };
+        if (authEnabled(env) && chat.owner_id) {
+          const { results: mems } = await env.DB.prepare(
+            `SELECT cm.user_id, cm.role, cm.created_at, u.name, u.picture FROM chat_members cm
+             JOIN users u ON u.id = cm.user_id WHERE cm.chat_id = ? ORDER BY cm.created_at`
+          ).bind(chat.id).all();
+          payload.members = mems.map(r => ({
+            userId: r.user_id, role: r.role, name: r.name, picture: r.picture,
+            isOwner: r.user_id === chat.owner_id,
+          }));
+          if (access.role === 'editor') {
+            const { results: invs } = await env.DB.prepare(
+              `SELECT i.token, i.role, i.invitee_name, i.created_at, i.used_by, i.used_at, u.name AS used_name
+               FROM invites i LEFT JOIN users u ON u.id = i.used_by
+               WHERE i.chat_id = ? ORDER BY i.created_at DESC`
+            ).bind(chat.id).all();
+            payload.invites = invs.map(i => ({
+              token: i.token, role: i.role, name: i.invitee_name, createdAt: i.created_at,
+              usedBy: i.used_by, usedByName: i.used_name, usedAt: i.used_at,
+            }));
+            const { results: reqs } = await env.DB.prepare(
+              `SELECT r.user_id, r.created_at, u.name, u.picture FROM access_requests r
+               JOIN users u ON u.id = r.user_id WHERE r.chat_id = ? ORDER BY r.created_at`
+            ).bind(chat.id).all();
+            payload.requests = reqs.map(r => ({
+              userId: r.user_id, name: r.name, picture: r.picture, createdAt: r.created_at,
+            }));
+          }
+        }
+        return json(payload);
+      }
+
+      // ---- sharing: visibility, members, invites, access requests, friends ----
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)$/)) && request.method === 'PATCH') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        if (access.role !== 'editor') return json({ error: 'editors only' }, 403);
+        const { visibility } = await request.json();
+        if (!['private', 'public'].includes(visibility)) return json({ error: 'bad visibility' }, 400);
+        await env.DB.prepare('UPDATE chats SET visibility = ? WHERE id = ?').bind(visibility, chat.id).run();
+        return json({ ok: true, visibility });
+      }
+
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/members$/)) && request.method === 'POST') {
+        // direct add — the "people you've chatted with" one-click path
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        if ((await chatAccess(env, user, chat)).role !== 'editor') return json({ error: 'editors only' }, 403);
+        const { userId, role } = await request.json();
+        if (!validRole(role)) return json({ error: 'bad role' }, 400);
+        const target = await env.DB.prepare('SELECT id, status FROM users WHERE id = ?').bind(userId).first();
+        if (!target || target.status === 'blocked') return json({ error: 'no such user' }, 404);
+        await addMember(env, chat, target.id, role, user);
+        return json({ ok: true });
+      }
+
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/members\/([A-Za-z0-9_-]+)$/))) {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        if (m[2] === chat.owner_id) return json({ error: "the owner's access can't be changed" }, 400);
+        if (request.method === 'PATCH') {
+          if (access.role !== 'editor') return json({ error: 'editors only' }, 403);
+          const { role } = await request.json();
+          if (!validRole(role)) return json({ error: 'bad role' }, 400);
+          await env.DB.prepare('UPDATE chat_members SET role = ? WHERE chat_id = ? AND user_id = ?')
+            .bind(role, chat.id, m[2]).run();
+          return json({ ok: true });
+        }
+        if (request.method === 'DELETE') {
+          // editors kick anyone (but the owner); anyone may remove themself
+          if (access.role !== 'editor' && user?.id !== m[2]) return json({ error: 'editors only' }, 403);
+          await env.DB.prepare('DELETE FROM chat_members WHERE chat_id = ? AND user_id = ?')
+            .bind(chat.id, m[2]).run();
+          return json({ ok: true });
+        }
+      }
+
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/invites$/)) && request.method === 'POST') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        if ((await chatAccess(env, user, chat)).role !== 'editor') return json({ error: 'editors only' }, 403);
+        const { name, role } = await request.json();
+        if (!validRole(role)) return json({ error: 'bad role' }, 400);
+        const token = slug(20);
+        await env.DB.prepare(
+          'INSERT INTO invites (token, chat_id, role, invitee_name, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+        ).bind(token, chat.id, role, String(name || '').slice(0, 40) || null, user?.id || '', Date.now()).run();
+        return json({ token, url: `${url.origin}/i/${token}` });
+      }
+
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/invites\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        if ((await chatAccess(env, user, chat)).role !== 'editor') return json({ error: 'editors only' }, 403);
+        await env.DB.prepare('DELETE FROM invites WHERE token = ? AND chat_id = ?').bind(m[2], chat.id).run();
+        return json({ ok: true });
+      }
+
+      // what an invite link points at (public: the landing page for the link)
+      if ((m = pathname.match(/^\/api\/invites\/([A-Za-z0-9_-]+)$/)) && request.method === 'GET') {
+        const inv = await env.DB.prepare('SELECT * FROM invites WHERE token = ?').bind(m[1]).first();
+        if (!inv) return json({ error: 'invite not found' }, 404);
+        const user = await getUser(request, env);
+        const member = user
+          ? await env.DB.prepare('SELECT 1 AS x FROM chat_members WHERE chat_id = ? AND user_id = ?')
+              .bind(inv.chat_id, user.id).first()
+          : null;
+        const { results } = await env.DB
+          .prepare('SELECT DISTINCT author FROM messages WHERE chat_id = ?').bind(inv.chat_id).all();
+        return json({
+          chatId: inv.chat_id,
+          role: inv.role,
+          inviteeName: inv.invitee_name,
+          participants: results.map(r => r.author),
+          signedIn: !!user,
+          status: member ? 'member'
+            : !inv.used_by ? 'open'
+            : user && inv.used_by === user.id ? 'used-by-you' : 'used',
         });
+      }
+
+      if ((m = pathname.match(/^\/api\/invites\/([A-Za-z0-9_-]+)\/accept$/)) && request.method === 'POST') {
+        const inv = await env.DB.prepare('SELECT * FROM invites WHERE token = ?').bind(m[1]).first();
+        if (!inv) return json({ error: 'invite not found' }, 404);
+        const user = await getUser(request, env);
+        if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
+        if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(inv.chat_id).first();
+        if (!chat) return json({ error: 'chat gone' }, 404);
+        const member = await env.DB.prepare('SELECT 1 AS x FROM chat_members WHERE chat_id = ? AND user_id = ?')
+          .bind(chat.id, user.id).first();
+        if (member || user.id === chat.owner_id) return json({ ok: true, chatId: chat.id }); // already in — don't burn the link
+        if (inv.used_by && inv.used_by !== user.id) return json({ error: 'this invite was already used', code: 'used' }, 409);
+        if (!inv.used_by) {
+          await env.DB.prepare('UPDATE invites SET used_by = ?, used_at = ? WHERE token = ?')
+            .bind(user.id, Date.now(), inv.token).run();
+        }
+        await addMember(env, chat, user.id, inv.role, null);
+        // tell whoever sent the link that it got used
+        ctx.waitUntil(pushToUsers(env, [inv.created_by], {
+          title: 'splitty',
+          body: `${user.name} accepted your invite${inv.invitee_name ? ` (sent to ${inv.invitee_name})` : ''}`,
+          url: `/c/${chat.id}`,
+          tag: `chat-${chat.id}`,
+        }));
+        return json({ ok: true, chatId: chat.id });
+      }
+
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/request$/)) && request.method === 'POST') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
+        if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+        const member = await env.DB.prepare('SELECT 1 AS x FROM chat_members WHERE chat_id = ? AND user_id = ?')
+          .bind(chat.id, user.id).first();
+        if (member || user.id === chat.owner_id) return json({ ok: true, already: true });
+        await env.DB.prepare(
+          'INSERT OR IGNORE INTO access_requests (chat_id, user_id, created_at) VALUES (?, ?, ?)'
+        ).bind(chat.id, user.id, Date.now()).run();
+        ctx.waitUntil(chatEditorIds(env, chat).then(ids => pushToUsers(env, ids, {
+          title: 'splitty',
+          body: `${user.name} is asking to join your chat`,
+          url: `/c/${chat.id}`,
+          tag: `chat-${chat.id}`,
+        })));
+        return json({ ok: true });
+      }
+
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/requests\/([A-Za-z0-9_-]+)$/))) {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        if ((await chatAccess(env, user, chat)).role !== 'editor') return json({ error: 'editors only' }, 403);
+        if (request.method === 'POST') { // approve, with a role
+          const { role } = await request.json();
+          if (!validRole(role)) return json({ error: 'bad role' }, 400);
+          await addMember(env, chat, m[2], role, user);
+          return json({ ok: true });
+        }
+        if (request.method === 'DELETE') { // deny
+          await env.DB.prepare('DELETE FROM access_requests WHERE chat_id = ? AND user_id = ?')
+            .bind(chat.id, m[2]).run();
+          return json({ ok: true });
+        }
+      }
+
+      // everyone you've explicitly shared a chat with — the quick-add list
+      if (pathname === '/api/friends' && request.method === 'GET') {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
+        const { results } = await env.DB.prepare(
+          `SELECT DISTINCT u.id, u.name, u.picture FROM chat_members a
+           JOIN chat_members b ON b.chat_id = a.chat_id AND b.user_id != a.user_id
+           JOIN users u ON u.id = b.user_id
+           WHERE a.user_id = ? AND u.status != 'blocked'
+           ORDER BY u.name COLLATE NOCASE`
+        ).bind(user.id).all();
+        return json({ friends: results.map(r => ({ userId: r.id, name: r.name, picture: r.picture })) });
+      }
+
+      // ---- web push subscriptions ----
+      if (pathname === '/api/push/subscribe' && request.method === 'POST') {
+        const user = await getUser(request, env);
+        if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
+        const sub = (await request.json()).subscription || {};
+        if (!sub.endpoint || !sub.keys?.p256dh || !sub.keys?.auth) return json({ error: 'bad subscription' }, 400);
+        await env.DB.prepare(
+          'INSERT OR REPLACE INTO push_subs (endpoint, user_id, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?)'
+        ).bind(sub.endpoint, user.id, sub.keys.p256dh, sub.keys.auth, Date.now()).run();
+        return json({ ok: true });
+      }
+
+      if (pathname === '/api/push/unsubscribe' && request.method === 'POST') {
+        const { endpoint } = await request.json();
+        if (endpoint) await env.DB.prepare('DELETE FROM push_subs WHERE endpoint = ?').bind(endpoint).run();
+        return json({ ok: true });
       }
 
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages$/)) && request.method === 'POST') {
         return await createMessage(request, env, ctx, m[1]);
       }
 
-      // re-anchor an interjection (drag-to-move the split point) — author only
+      // re-anchor an interjection (drag-to-move the split point) — author or editor
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)$/)) && request.method === 'PATCH') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
         const row = await env.DB.prepare('SELECT parent_id, author, user_id FROM messages WHERE id = ? AND chat_id = ?')
           .bind(m[2], m[1]).first();
         if (!row) return json({ error: 'not found' }, 404);
         if (!row.parent_id) return json({ error: 'not an interjection' }, 400);
         const body = await request.json();
-        if (!(await ownsMessage(request, env, row, body.author))) return json({ error: 'only the author can move this' }, 403);
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        // name-only mode has no real roles — keep it author-only there
+        const canMove = authEnabled(env)
+          ? access.role === 'editor' || (roleAtLeast(access.role, 'commenter') && ownsMessage(user, row, body.author))
+          : ownsMessage(user, row, body.author);
+        if (!canMove) return json({ error: 'only the author or an editor can move this' }, 403);
         const anchorMs = Math.max(0, Math.round(Number(body.anchorMs) || 0));
         await env.DB.prepare('UPDATE messages SET anchor_ms = ? WHERE id = ?').bind(anchorMs, m[2]).run();
         return json({ ok: true, anchorMs });
       }
 
-      // delete own message; its interjections fall onto its spot in the parent
+      // delete a message; its interjections fall onto its spot in the parent — author or editor
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
         const row = await env.DB
           .prepare('SELECT author, user_id, parent_id, anchor_ms, video_key FROM messages WHERE id = ? AND chat_id = ?')
           .bind(m[2], m[1]).first();
         if (!row) return json({ error: 'not found' }, 404);
         const body = await request.json();
-        if (!(await ownsMessage(request, env, row, body.author))) return json({ error: 'only the author can delete this' }, 403);
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        const canDelete = authEnabled(env)
+          ? access.role === 'editor' || (roleAtLeast(access.role, 'commenter') && ownsMessage(user, row, body.author))
+          : ownsMessage(user, row, body.author);
+        if (!canDelete) return json({ error: 'only the author or an editor can delete this' }, 403);
         if (row.parent_id) {
           await env.DB.prepare('UPDATE messages SET parent_id = ?, anchor_ms = ? WHERE parent_id = ?')
             .bind(row.parent_id, row.anchor_ms, m[2]).run();
@@ -412,8 +738,10 @@ export default {
   },
 };
 
+const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced — 10 minutes each
+
 async function createMessage(request, env, ctx, chatId) {
-  const chat = await env.DB.prepare('SELECT id FROM chats WHERE id = ?').bind(chatId).first();
+  const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(chatId).first();
   if (!chat) return json({ error: 'not found' }, 404);
 
   // approvals only apply once auth is configured; name-only mode stays open
@@ -422,6 +750,10 @@ async function createMessage(request, env, ctx, chatId) {
     user = await getUser(request, env);
     if (!user) return json({ error: 'sign in to send messages', code: 'auth' }, 401);
     if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+    const access = await chatAccess(env, user, chat);
+    if (!roleAtLeast(access.role, 'commenter')) {
+      return json({ error: "you can watch this chat, but you don't have permission to record in it", code: 'role' }, 403);
+    }
     if (user.status === 'pending') {
       const { n } = await env.DB.prepare('SELECT COUNT(*) AS n FROM messages WHERE user_id = ?')
         .bind(user.id).first();
@@ -435,6 +767,10 @@ async function createMessage(request, env, ctx, chatId) {
   const video = form.get('video');
   const audio = form.get('audio'); // small audio-only track for transcription
   if (!(video instanceof File)) return json({ error: 'missing video' }, 400);
+  // 30s of slack over the client's auto-stop covers recorder stop latency
+  if (Number(form.get('durationMs')) > MAX_RECORD_MS + 30_000) {
+    return json({ error: 'recordings are capped at 10 minutes', code: 'toolong' }, 400);
+  }
 
   const mime = (video.type || 'video/webm').split(';')[0];
   const ext = { 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[mime] || 'webm';
@@ -465,10 +801,11 @@ async function createMessage(request, env, ctx, chatId) {
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
   ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.durationMs, msg.gain, msg.createdAt).run();
 
-  // transcribe after the response goes out; client polls for the result
+  // transcribe after the response goes out; client polls for the result.
+  // Push notifications wait for the transcript so they can quote the message.
   const transcriptSource = audio instanceof File && audio.size > 0 ? audio : video;
   const buf = await transcriptSource.arrayBuffer();
-  ctx.waitUntil(transcribe(env, msg.id, buf));
+  ctx.waitUntil(transcribe(env, msg.id, buf).then(() => notifyNewMessage(env, msg)));
 
   return json({ message: msg });
 }
@@ -490,6 +827,122 @@ async function transcribe(env, messageId, audioBuf) {
   }
   await env.DB.prepare('UPDATE messages SET text = ?, words = ?, transcript_status = ? WHERE id = ?')
     .bind(text, JSON.stringify(words), status, messageId).run();
+}
+
+// ---------- web push ----------
+// VAPID key is one Worker secret: the private JWK (kty EC / P-256, with d,x,y).
+// Generate with: node -e "const{generateKeyPairSync}=require('crypto');console.log(JSON.stringify(generateKeyPairSync('ec',{namedCurve:'P-256'}).privateKey.export({format:'jwk'})))"
+// then: wrangler secret put VAPID_JWK
+const b64u = {
+  enc: buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+  dec: s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)),
+};
+
+const pushEnabled = env => !!env.VAPID_JWK;
+
+// uncompressed P-256 point (0x04 || x || y) — the applicationServerKey clients use
+function vapidPublicKey(env) {
+  const jwk = JSON.parse(env.VAPID_JWK);
+  const buf = new Uint8Array(65);
+  buf[0] = 4;
+  buf.set(b64u.dec(jwk.x), 1);
+  buf.set(b64u.dec(jwk.y), 33);
+  return b64u.enc(buf);
+}
+
+async function vapidAuthHeader(env, endpoint) {
+  const key = await crypto.subtle.importKey('jwk', JSON.parse(env.VAPID_JWK),
+    { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const te = new TextEncoder();
+  const head = b64u.enc(te.encode(JSON.stringify({ typ: 'JWT', alg: 'ES256' })));
+  const payload = b64u.enc(te.encode(JSON.stringify({
+    aud: new URL(endpoint).origin,
+    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+    sub: 'mailto:' + ((env.EMAIL_FROM || '').match(/<(.+)>/)?.[1] || 'no-reply@splitty.chat'),
+  })));
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, te.encode(`${head}.${payload}`));
+  return `vapid t=${head}.${payload}.${b64u.enc(sig)}, k=${vapidPublicKey(env)}`;
+}
+
+// RFC 8291 message encryption (aes128gcm content coding)
+async function encryptPush(sub, payload) {
+  const uaPub = b64u.dec(sub.p256dh);   // subscriber's public key, 65 bytes
+  const authSecret = b64u.dec(sub.auth);
+  const asKeys = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const asPub = new Uint8Array(await crypto.subtle.exportKey('raw', asKeys.publicKey));
+  const uaKey = await crypto.subtle.importKey('raw', uaPub, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: 'ECDH', public: uaKey }, asKeys.privateKey, 256));
+
+  const te = new TextEncoder();
+  const hkdf = async (ikm, salt, info, len) => {
+    const key = await crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits']);
+    return new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info }, key, len * 8));
+  };
+  const keyInfo = new Uint8Array([...te.encode('WebPush: info\0'), ...uaPub, ...asPub]);
+  const ikm = await hkdf(ecdh, authSecret, keyInfo, 32);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const cek = await hkdf(ikm, salt, te.encode('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = await hkdf(ikm, salt, te.encode('Content-Encoding: nonce\0'), 12);
+
+  const record = new Uint8Array([...te.encode(payload), 2]); // 0x02 delimiter = last record
+  const aesKey = await crypto.subtle.importKey('raw', cek, 'AES-GCM', false, ['encrypt']);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, aesKey, record));
+
+  // header: salt(16) | record size(4) | keyid len(1) | as public key(65) | ciphertext
+  const out = new Uint8Array(86 + ct.length);
+  out.set(salt, 0);
+  new DataView(out.buffer).setUint32(16, 4096);
+  out[20] = 65;
+  out.set(asPub, 21);
+  out.set(ct, 86);
+  return out;
+}
+
+async function sendPush(env, sub, payloadObj) {
+  try {
+    const res = await fetch(sub.endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: await vapidAuthHeader(env, sub.endpoint),
+        'Content-Encoding': 'aes128gcm',
+        'Content-Type': 'application/octet-stream',
+        TTL: '86400',
+        Urgency: 'normal',
+      },
+      body: await encryptPush(sub, JSON.stringify(payloadObj)),
+    });
+    if (res.status === 404 || res.status === 410) {
+      // subscription is dead — stop keeping it around
+      await env.DB.prepare('DELETE FROM push_subs WHERE endpoint = ?').bind(sub.endpoint).run();
+    }
+  } catch (err) {
+    console.error('push failed:', String(err));
+  }
+}
+
+async function pushToUsers(env, userIds, payload) {
+  const ids = [...new Set(userIds)].filter(Boolean);
+  if (!pushEnabled(env) || !ids.length) return;
+  const { results } = await env.DB.prepare(
+    `SELECT endpoint, p256dh, auth FROM push_subs WHERE user_id IN (${ids.map(() => '?').join(',')})`
+  ).bind(...ids).all();
+  await Promise.all(results.map(sub => sendPush(env, sub, payload)));
+}
+
+// after transcription lands: "Joshua said “first few words…”" to every member
+async function notifyNewMessage(env, msg) {
+  const { results } = await env.DB.prepare('SELECT user_id FROM chat_members WHERE chat_id = ?')
+    .bind(msg.chatId).all();
+  const row = await env.DB.prepare('SELECT text FROM messages WHERE id = ?').bind(msg.id).first();
+  const text = (row?.text || '').trim();
+  await pushToUsers(env,
+    results.map(r => r.user_id).filter(id => id !== msg.userId),
+    {
+      title: `${msg.author} · splitty`,
+      body: text ? `“${text.length > 90 ? text.slice(0, 90) + '…' : text}”` : 'sent a video note',
+      url: `/c/${msg.chatId}`,
+      tag: `chat-${msg.chatId}`,
+    });
 }
 
 function toBase64(buf) {

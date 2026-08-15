@@ -22,7 +22,23 @@ const state = {
   hideGaps: localStorage.getItem('splitty:hidegaps') === '1', // clip silences from playback
   dragging: null,    // { msg, target } while re-anchoring an interjection
   lastRenderKey: '',
+  // access control (populated by poll once auth is configured)
+  myRole: null,      // 'editor' | 'commenter' | 'viewer' | null (unknown/locked)
+  isOwner: false,
+  chatMeta: null,    // { id, createdAt, visibility, ownerId }
+  members: [],
+  invites: [],
+  requests: [],
+  friends: null,     // lazy-loaded for the share panel
+  inviteToken: null, // ?invite= view-only credential for private chats
+  roleInit: false,   // first-poll gate/camera decision made
 };
+
+const ROLE_RANK = { viewer: 1, commenter: 2, editor: 3 };
+// can this person record here? (name-only dev mode stays open)
+const canComment = () =>
+  !state.auth?.authEnabled || (ROLE_RANK[state.myRole] || 0) >= ROLE_RANK.commenter;
+const canEdit = () => !!state.auth?.authEnabled && state.myRole === 'editor';
 
 // name comparison is forgiving about case/whitespace so "Josh " on your phone
 // still owns what "josh" recorded on your laptop
@@ -49,6 +65,7 @@ const mediaUrl = msg => {
 // ---------- boot ----------
 // session first: signed-in users take their account name everywhere
 const chatMatch = location.pathname.match(/^\/c\/([A-Za-z0-9_-]+)/);
+const inviteMatch = location.pathname.match(/^\/i\/([A-Za-z0-9_-]+)/);
 fetch('/api/me')
   .then(r => r.json())
   .catch(() => ({ user: null, providers: {}, authEnabled: false }))
@@ -61,6 +78,8 @@ fetch('/api/me')
     if (chatMatch) {
       state.chatId = chatMatch[1];
       initChat();
+    } else if (inviteMatch) {
+      initInvite(inviteMatch[1]);
     } else if (location.pathname === '/admin') {
       initAdmin();
     } else {
@@ -309,6 +328,12 @@ function initLanding() {
         const row = rows.get(c.id);
         if (!row) continue;
         if (!c.exists) { row.remove(); gone.push(c.id); continue; }
+        if (c.private) {
+          // you can no longer see inside (signed out, or access was removed)
+          row.querySelector('.rc-names').textContent = 'Private chat';
+          row.querySelector('.rc-meta').textContent = '';
+          continue;
+        }
         const others = (c.participants || []).filter(n => !isMine(n));
         row.querySelector('.rc-names').textContent =
           others.length ? `with ${others.join(', ')}` : c.count ? 'just you so far' : 'empty chat';
@@ -436,12 +461,18 @@ async function loadAdmin(fromCache = false) {
 // ---------- chat ----------
 function initChat() {
   state.seen = JSON.parse(localStorage.getItem(`splitty:seen:${state.chatId}`) || '{}');
+  state.inviteToken = new URLSearchParams(location.search).get('invite');
   $('#chat').classList.remove('hidden');
-  $('#copy-link').onclick = async () => {
-    await navigator.clipboard.writeText(location.href);
-    $('#copy-link').textContent = 'Copied!';
-    setTimeout(() => ($('#copy-link').textContent = 'Copy invite link'), 1500);
+  // share opens the panel on access-controlled chats, else just copies the link
+  $('#share-btn').onclick = () => {
+    if (state.auth?.authEnabled && state.chatMeta?.ownerId) return openShare();
+    copyChatLink($('#share-btn'), 'Share');
   };
+  $('#share-close').onclick = () => $('#share-gate').classList.add('hidden');
+  $('#share-gate').addEventListener('click', e => {
+    if (e.target === $('#share-gate')) $('#share-gate').classList.add('hidden');
+  });
+  initPush();
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;
@@ -639,8 +670,14 @@ function initChat() {
   } else {
     $('#name-btn').onclick = openNameGate;
   }
-  if (gateAuthMode || !state.name) openNameGate();
-  else ensureCam().catch(armCamRetry); // camera warms up immediately so recording is instant
+  state.openNameGate = openNameGate;
+  if (!state.auth?.authEnabled) {
+    // name-only mode: gate on a name, then warm the camera
+    if (!state.name) openNameGate();
+    else ensureCam().catch(armCamRetry);
+  }
+  // with auth configured, wait for the first poll: viewers never get gated or
+  // asked for a camera, and locked chats show the request-access screen instead
 
   // remember this chat on the landing page
   const recent = JSON.parse(localStorage.getItem('splitty:recent') || '[]')
@@ -654,20 +691,84 @@ function initChat() {
 
 async function poll() {
   try {
-    const res = await fetch(`/api/chats/${state.chatId}`);
+    const inv = state.inviteToken ? `?invite=${encodeURIComponent(state.inviteToken)}` : '';
+    const res = await fetch(`/api/chats/${state.chatId}${inv}`);
     if (res.status === 404) {
       $('#messages').innerHTML = '<div class="empty">This chat doesn\'t exist.</div>';
       return;
     }
+    if (res.status === 401 || res.status === 403) {
+      showLocked(await res.json().catch(() => ({})), res.status);
+      return;
+    }
+    hideLocked();
     const data = await res.json();
     state.messages = data.messages;
     state.byId = new Map(data.messages.map(m => [m.id, m]));
+    state.chatMeta = data.chat;
+    state.isOwner = !!data.isOwner;
+    state.members = data.members || [];
+    state.invites = data.invites || [];
+    state.requests = data.requests || [];
+    if (data.myRole !== undefined) setRole(data.myRole);
     render();
+    if (!$('#share-gate').classList.contains('hidden')) renderShare();
     if (!state.cued && state.messages.length && !state.playing && !state.rec) {
       state.cued = true;
       cueFirstUnheard();
     }
   } catch { /* offline blip — try again next poll */ }
+}
+
+// ---------- access states ----------
+function showLocked(err, status) {
+  if (state.playing) stopPlayback(); // access can vanish mid-watch (kicked, made private)
+  $('#chat').classList.add('hidden');
+  $('#locked').classList.remove('hidden');
+  const signedOut = status === 401 || err.code === 'auth';
+  $('#locked-msg').textContent = signedOut
+    ? 'This chat is private — sign in to ask for access.'
+    : "This chat is private. You can knock, and whoever's inside can let you in.";
+  $('#locked-signin').classList.toggle('hidden', !signedOut);
+  $('#locked-request').classList.toggle('hidden', signedOut || err.requested);
+  $('#locked-note').classList.toggle('hidden', !err.requested);
+  $('#locked-signin').onclick = () => {
+    wireAuthBox(location.pathname);
+    $('#name-gate').classList.remove('hidden');
+  };
+  $('#locked-request').onclick = async () => {
+    const r = await fetch(`/api/chats/${state.chatId}/request`, { method: 'POST' });
+    if (r.ok) {
+      $('#locked-request').classList.add('hidden');
+      $('#locked-note').classList.remove('hidden');
+    }
+  };
+}
+
+function hideLocked() {
+  if ($('#locked').classList.contains('hidden')) return;
+  $('#locked').classList.add('hidden');
+  $('#chat').classList.remove('hidden');
+}
+
+// role is known (or changed — e.g. you just got approved or promoted)
+function setRole(role) {
+  const changed = state.myRole !== role;
+  state.myRole = role;
+  document.body.classList.toggle('role-viewer', !canComment());
+  const n = state.requests.length;
+  $('#share-btn').textContent = canEdit() && n ? `Share (${n})` : 'Share';
+  if (changed) {
+    state.lastRenderKey = ''; // drag handles / delete buttons depend on the role
+    if (!state.auth?.authEnabled) return;
+    if (state.roleInit) return;
+    state.roleInit = true;
+    // first sight of the chat: only people who can record need a name + camera
+    if (canComment()) {
+      if (!state.name && !state.auth.user) state.openNameGate?.();
+      else ensureCam().catch(armCamRetry);
+    }
+  }
 }
 
 // on entry, park the player at the earliest moment you haven't heard
@@ -1165,8 +1266,11 @@ function remapPlayback() {
 }
 
 // ---------- recording ----------
+const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced
+
 async function toggleRecord() {
   if (state.rec) return stopRecord();
+  if (!canComment()) return showToast("You're watching this chat — ask an editor for record access");
 
   // interjecting? capture where we are, pause the playback
   let parentId = null, anchorMs = null, resume = null;
@@ -1213,6 +1317,7 @@ async function toggleRecord() {
   const onStop = () => {
     if (++stoppedCount < 2) return;
     const rec = state.rec;
+    const durationMs = Date.now() - rec.startTs;
     state.rec = null;
     if (rec.discard) {
       // accidental tap — 79ms videos help nobody
@@ -1222,11 +1327,22 @@ async function toggleRecord() {
       if (rec.resume) playFrom(rec.resume.msgId, rec.resume.atSec);
       return;
     }
-    uploadRecording(
-      new Blob(vChunks, { type: recorder.mimeType }),
-      new Blob(aChunks, { type: audioRecorder.mimeType }),
-      rec
-    );
+    enqueueUpload({
+      videoBlob: new Blob(vChunks, { type: recorder.mimeType }),
+      audioBlob: new Blob(aChunks, { type: audioRecorder.mimeType }),
+      rec,
+      durationMs,
+    });
+    // don't wait for the upload — resume watching (and recording) right away
+    if (rec.resume) {
+      // resume just past the (snapped) splice so you don't replay your own interjection
+      const parent = state.byId.get(rec.resume.msgId);
+      const at = parent ? snapAnchor(parent, rec.resume.atSec) + 0.001 : rec.resume.atSec;
+      playFrom(rec.resume.msgId, at);
+    } else {
+      updateStage();
+    }
+    updateHint();
   };
   recorder.onstop = onStop;
   audioRecorder.onstop = onStop;
@@ -1250,67 +1366,102 @@ function stopRecord() {
   $('#rec-btn').classList.remove('recording');
 }
 
-async function uploadRecording(videoBlob, audioBlob, rec) {
-  state.rec = null;
-  updateHint('Sending…');
+// Background upload queue: sends never block playback or the next recording.
+// Jobs go one at a time in FIFO order so clips land in the conversation in the
+// order they were recorded (the server stamps createdAt at insert).
+const uploader = { jobs: [], running: false, progress: null };
+
+function enqueueUpload(job) {
+  uploader.jobs.push(job);
+  runUploads();
+  updateHint();
+}
+
+async function runUploads() {
+  if (uploader.running) return;
+  uploader.running = true;
+  while (uploader.jobs.length) {
+    const job = uploader.jobs[0];
+    try {
+      const { message } = await uploadJob(job);
+      // your own message never shows as "new" to you
+      state.seen[message.id] = 10 * 60 * 60 * 1000;
+      localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen));
+      uploader.jobs.shift();
+      poll(); // pull the new message in; remapPlayback keeps our place if watching
+    } catch (err) {
+      uploader.jobs.shift();
+      if (err.code === 'pending') showToast('Sent limit reached — an admin needs to approve you before you can send more.');
+      else if (err.code === 'blocked') showToast('Your account is blocked from sending.');
+      else if (err.code === 'auth') { showToast('Sign in to send messages.'); $('#name-gate').classList.remove('hidden'); }
+      else showToast('Upload failed.', 'Retry', () => enqueueUpload(job));
+    }
+    uploader.progress = null;
+    updateHint();
+  }
+  uploader.running = false;
+}
+
+async function uploadJob({ videoBlob, audioBlob, rec, durationMs }) {
   const fd = new FormData();
   fd.append('video', videoBlob, `note.${videoBlob.type.includes('mp4') ? 'mp4' : 'webm'}`);
   if (audioBlob && audioBlob.size) {
     fd.append('audio', audioBlob, `audio.${audioBlob.type.includes('mp4') ? 'm4a' : 'webm'}`);
   }
   fd.append('author', state.name || 'anon');
-  fd.append('durationMs', String(Date.now() - rec.startTs));
+  fd.append('durationMs', String(durationMs));
   if (audioBlob && audioBlob.size) fd.append('gain', String(await measureGain(audioBlob)));
   if (rec.parentId) {
     fd.append('parentId', rec.parentId);
     fd.append('anchorMs', String(rec.anchorMs));
   }
-  try {
-    const { message } = await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', `/api/chats/${state.chatId}/messages`);
-      xhr.upload.onprogress = e =>
-        e.lengthComputable && updateHint(`Sending… ${Math.round((e.loaded / e.total) * 100)}%`);
-      xhr.onload = () => {
-        if (xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
-        let err = {};
-        try { err = JSON.parse(xhr.responseText); } catch {}
-        reject(Object.assign(new Error(err.error || `upload ${xhr.status}`), { code: err.code }));
-      };
-      xhr.onerror = () => reject(new Error('network'));
-      xhr.send(fd);
-    });
-    // your own message never shows as "new" to you
-    state.seen[message.id] = 10 * 60 * 60 * 1000;
-    localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen));
-  } catch (err) {
-    if (err.code === 'pending') showToast('Sent limit reached — an admin needs to approve you before you can send more.');
-    else if (err.code === 'blocked') showToast('Your account is blocked from sending.');
-    else if (err.code === 'auth') { showToast('Sign in to send messages.'); $('#name-gate').classList.remove('hidden'); }
-    else showToast('Upload failed — try again.');
-  }
-  await poll();
-  if (rec.resume) {
-    // resume just past the (snapped) splice so you don't replay your own interjection
-    const parent = state.byId.get(rec.resume.msgId);
-    const at = parent ? snapAnchor(parent, rec.resume.atSec) + 0.001 : rec.resume.atSec;
-    playFrom(rec.resume.msgId, at);
-  } else {
-    updateStage();
-  }
-  updateHint();
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/chats/${state.chatId}/messages`);
+    xhr.upload.onprogress = e => {
+      if (!e.lengthComputable) return;
+      uploader.progress = Math.round((e.loaded / e.total) * 100);
+      updateHint();
+    };
+    xhr.onload = () => {
+      if (xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
+      let err = {};
+      try { err = JSON.parse(xhr.responseText); } catch {}
+      reject(Object.assign(new Error(err.error || `upload ${xhr.status}`), { code: err.code }));
+    };
+    xhr.onerror = () => reject(new Error('network'));
+    xhr.send(fd);
+  });
 }
 
-// recording timer + hint line
+// a pending upload would be lost if the tab closes now
+window.addEventListener('beforeunload', e => {
+  if (uploader.jobs.length) e.preventDefault();
+});
+
+// recording timer + hint line + the 10-minute cap
 setInterval(() => {
-  if (state.rec) {
-    const s = Math.floor((Date.now() - state.rec.startTs) / 1000);
-    updateHint(`● Recording ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} — tap to send`);
+  if (state.rec && !state.rec.discard && Date.now() - state.rec.startTs >= MAX_RECORD_MS) {
+    stopRecord();
+    showToast('Hit the 10-minute limit — sending this clip');
   }
+  updateHint();
 }, 250);
 
-// only transient status (recording timer, upload %) — empty hides the pill
+// only transient status (recording timer, upload state) — empty hides the pill.
+// Recording wins the pill; background sends show while idle.
 function updateHint(text) {
+  if (text == null && state.rec) {
+    const elapsed = Date.now() - state.rec.startTs;
+    const s = Math.floor(elapsed / 1000);
+    text = `● Recording ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} — tap to send`;
+    const left = MAX_RECORD_MS - elapsed;
+    if (left < 60_000) text += ` · ${Math.max(Math.ceil(left / 1000), 0)}s left`;
+  }
+  if (text == null && uploader.jobs.length) {
+    const pct = uploader.progress != null ? ` ${uploader.progress}%` : '';
+    text = uploader.jobs.length > 1 ? `Sending ${uploader.jobs.length} clips…${pct}` : `Sending…${pct}`;
+  }
   $('#rec-hint').textContent = text ?? '';
 }
 
@@ -1476,8 +1627,8 @@ function renderMessage(msg, depth) {
     <span class="dur">${fmtClock(msgDur(msg))}</span>
     ${isNew ? '<span class="badge">new</span>' : ''}
     <span class="spacer"></span>
-    ${mine && depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}
-    ${mine ? '<button class="del-btn" title="Delete this message">✕</button>' : ''}`;
+    ${(mine || canEdit()) && depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}
+    ${mine || canEdit() ? '<button class="del-btn" title="Delete this message">✕</button>' : ''}`;
   const authorEl = head.querySelector('.author');
   authorEl.textContent = msg.author;
   authorEl.style.color = colorFor(msg.author);
@@ -1570,6 +1721,342 @@ const fmtTime = ts => {
   return (today ? '' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ') +
     d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 };
+
+// ---------- share panel ----------
+const JSONH = { 'Content-Type': 'application/json' };
+
+async function copyChatLink(btn, label) {
+  await navigator.clipboard.writeText(`${location.origin}/c/${state.chatId}`);
+  btn.textContent = 'Copied!';
+  setTimeout(() => (btn.textContent = label), 1500);
+}
+
+function openShare() {
+  $('#share-gate').classList.remove('hidden');
+  lastShareKey = ''; // always paint fresh on open
+  renderShare();
+  if (canEdit() && state.friends === null) loadFriends();
+}
+
+async function loadFriends() {
+  try {
+    const res = await fetch('/api/friends');
+    if (!res.ok) return;
+    state.friends = (await res.json()).friends || [];
+    renderShare();
+  } catch { /* panel just skips the quick-add list */ }
+}
+
+// one row of the share panel: avatar + name/subtitle + trailing controls
+function shareRow(name, sub, picture) {
+  const row = document.createElement('div');
+  row.className = 'share-row';
+  if (picture) {
+    const img = document.createElement('img');
+    img.className = 'avatar';
+    img.src = picture;
+    img.referrerPolicy = 'no-referrer';
+    row.appendChild(img);
+  }
+  const label = document.createElement('span');
+  label.className = 'sr-name';
+  label.textContent = name;
+  if (sub) {
+    const s = document.createElement('small');
+    s.className = 'sr-sub';
+    s.textContent = sub;
+    label.appendChild(s);
+  }
+  row.appendChild(label);
+  return row;
+}
+
+const roleSelect = (value, disabled = false) => {
+  const sel = document.createElement('select');
+  for (const [v, t] of [['editor', 'Editor'], ['commenter', 'Commenter'], ['viewer', 'Viewer']]) {
+    sel.appendChild(Object.assign(document.createElement('option'), { value: v, textContent: t }));
+  }
+  sel.value = value;
+  sel.disabled = disabled;
+  return sel;
+};
+
+let lastShareKey = '';
+function renderShare() {
+  const editor = canEdit();
+  // polls call this every 2.5s while the panel is open — only rebuild the DOM
+  // when the underlying data changed, so open menus/half-typed text survive
+  const key = JSON.stringify([
+    editor, state.chatMeta?.visibility, state.members, state.invites, state.requests, state.friends,
+  ]);
+  if (key === lastShareKey) return;
+  lastShareKey = key;
+
+  $('#vis-row').classList.toggle('hidden', !editor);
+  const vis = $('#vis-toggle');
+  vis.checked = state.chatMeta?.visibility === 'public';
+  vis.onchange = async () => {
+    const visibility = vis.checked ? 'public' : 'private';
+    const res = await fetch(`/api/chats/${state.chatId}`, {
+      method: 'PATCH', headers: JSONH, body: JSON.stringify({ visibility }),
+    });
+    if (res.ok) {
+      state.chatMeta.visibility = visibility;
+      showToast(visibility === 'public' ? 'Anyone with the link can watch now' : 'Back to invite-only');
+    } else {
+      vis.checked = !vis.checked;
+    }
+  };
+  $('#share-copy').onclick = () => copyChatLink($('#share-copy'), 'Copy chat link');
+
+  // a signed-in viewer who isn't a member yet (public chat / invite peek) can knock
+  const amMember = state.members.some(mm => mm.userId === state.auth?.user?.id);
+  const canAsk = !!state.auth?.user && !amMember && !editor && !!state.chatMeta?.ownerId;
+  $('#share-ask').classList.toggle('hidden', !canAsk);
+  $('#share-ask').onclick = async () => {
+    const r = await fetch(`/api/chats/${state.chatId}/request`, { method: 'POST' });
+    if (r.ok) {
+      $('#share-ask').textContent = 'Asked — waiting for an editor';
+      $('#share-ask').disabled = true;
+    }
+  };
+
+  // knocking at the door
+  $('#share-requests-wrap').classList.toggle('hidden', !editor || !state.requests.length);
+  const rq = $('#share-requests');
+  rq.innerHTML = '';
+  if (editor) {
+    for (const r of state.requests) {
+      const row = shareRow(r.name, 'wants to join', r.picture);
+      const sel = roleSelect('commenter');
+      const ok = Object.assign(document.createElement('button'), { className: 'btn-ghost', textContent: 'Let in' });
+      ok.onclick = async () => {
+        await fetch(`/api/chats/${state.chatId}/requests/${r.userId}`, {
+          method: 'POST', headers: JSONH, body: JSON.stringify({ role: sel.value }),
+        });
+        poll();
+      };
+      const no = Object.assign(document.createElement('button'), { className: 'btn-danger', textContent: '✕', title: 'Deny' });
+      no.onclick = async () => {
+        await fetch(`/api/chats/${state.chatId}/requests/${r.userId}`, { method: 'DELETE' });
+        poll();
+      };
+      row.append(sel, ok, no);
+      rq.appendChild(row);
+    }
+  }
+
+  // who's in
+  $('#share-members-wrap').classList.toggle('hidden', !state.members.length);
+  const mb = $('#share-members');
+  mb.innerHTML = '';
+  for (const mem of state.members) {
+    const me = mem.userId === state.auth?.user?.id;
+    const row = shareRow(mem.name + (me ? ' (you)' : ''), null, mem.picture);
+    if (mem.isOwner) {
+      row.appendChild(Object.assign(document.createElement('span'), { className: 'owner-pill', textContent: 'owner' }));
+    } else if (editor) {
+      const sel = roleSelect(mem.role);
+      sel.onchange = async () => {
+        const res = await fetch(`/api/chats/${state.chatId}/members/${mem.userId}`, {
+          method: 'PATCH', headers: JSONH, body: JSON.stringify({ role: sel.value }),
+        });
+        if (!res.ok) sel.value = mem.role;
+        poll();
+      };
+      const kick = Object.assign(document.createElement('button'), { className: 'btn-danger', textContent: '✕', title: 'Remove from chat' });
+      kick.onclick = async () => {
+        if (!confirm(`Remove ${mem.name} from this chat?`)) return;
+        await fetch(`/api/chats/${state.chatId}/members/${mem.userId}`, { method: 'DELETE' });
+        poll();
+      };
+      row.append(sel, kick);
+    } else {
+      row.appendChild(Object.assign(document.createElement('span'), { className: 'sr-sub', textContent: mem.role }));
+    }
+    mb.appendChild(row);
+  }
+
+  // invites + quick-add
+  $('#share-invite-wrap').classList.toggle('hidden', !editor);
+  if (!editor) return;
+
+  $('#invite-form').onsubmit = async e => {
+    e.preventDefault();
+    const name = $('#invite-name').value.trim();
+    const res = await fetch(`/api/chats/${state.chatId}/invites`, {
+      method: 'POST', headers: JSONH,
+      body: JSON.stringify({ name, role: $('#invite-role').value }),
+    });
+    if (!res.ok) return showToast("Couldn't create the invite");
+    const { url } = await res.json();
+    try { await navigator.clipboard.writeText(url); } catch {}
+    showToast(name ? `Invite link for ${name} copied — send it over` : 'Invite link copied — send it over');
+    $('#invite-name').value = '';
+    poll();
+  };
+
+  const iv = $('#share-invites');
+  iv.innerHTML = '';
+  for (const inv of state.invites) {
+    const used = !!inv.usedBy;
+    const row = shareRow(
+      inv.name || 'Unnamed invite',
+      used ? `${inv.role} · used by ${inv.usedByName || 'someone'}` : `${inv.role} · not used yet`,
+    );
+    if (!used) {
+      const copy = Object.assign(document.createElement('button'), { className: 'btn-ghost', textContent: 'Copy' });
+      copy.onclick = async () => {
+        await navigator.clipboard.writeText(`${location.origin}/i/${inv.token}`);
+        copy.textContent = 'Copied!';
+        setTimeout(() => (copy.textContent = 'Copy'), 1500);
+      };
+      row.appendChild(copy);
+    }
+    const del = Object.assign(document.createElement('button'), {
+      className: 'btn-danger', textContent: '✕',
+      title: used ? 'Forget this invite (kick the person from the People list)' : 'Revoke this link',
+    });
+    del.onclick = async () => {
+      await fetch(`/api/chats/${state.chatId}/invites/${inv.token}`, { method: 'DELETE' });
+      poll();
+    };
+    row.appendChild(del);
+    iv.appendChild(row);
+  }
+
+  const memberIds = new Set(state.members.map(mm => mm.userId));
+  const friends = (state.friends || []).filter(f => !memberIds.has(f.userId));
+  $('#share-friends-wrap').classList.toggle('hidden', !friends.length);
+  const fr = $('#share-friends');
+  fr.innerHTML = '';
+  for (const f of friends) {
+    const row = shareRow(f.name, null, f.picture);
+    const sel = roleSelect('commenter');
+    const add = Object.assign(document.createElement('button'), { className: 'btn-ghost', textContent: 'Add' });
+    add.onclick = async () => {
+      add.disabled = true;
+      const res = await fetch(`/api/chats/${state.chatId}/members`, {
+        method: 'POST', headers: JSONH,
+        body: JSON.stringify({ userId: f.userId, role: sel.value }),
+      });
+      if (!res.ok) { add.disabled = false; return showToast("Couldn't add them"); }
+      poll();
+    };
+    row.append(sel, add);
+    fr.appendChild(row);
+  }
+}
+
+// ---------- invite landing (/i/:token) ----------
+async function initInvite(token) {
+  $('#invite-page').classList.remove('hidden');
+  $('#name-gate').addEventListener('click', e => {
+    if (e.target === $('#name-gate')) $('#name-gate').classList.add('hidden');
+  });
+  let inv;
+  try {
+    const res = await fetch(`/api/invites/${token}`);
+    if (!res.ok) throw 0;
+    inv = await res.json();
+  } catch {
+    $('#invite-lead').textContent = "This invite doesn't exist — it may have been revoked.";
+    $('#invite-note').innerHTML = '<a href="/">Go home</a>';
+    return;
+  }
+  if (inv.status === 'member' || inv.status === 'used-by-you') {
+    location.replace(`/c/${inv.chatId}`);
+    return;
+  }
+  if (inv.status === 'used') {
+    $('#invite-lead').textContent = 'This invite was already used — each link only works once.';
+    $('#invite-note').textContent = 'If it was meant for you, ask for a fresh one.';
+    return;
+  }
+  const who = inv.inviteeName ? `${inv.inviteeName}, you're` : "You're";
+  const withWho = inv.participants?.length ? ` with ${inv.participants.slice(0, 4).join(', ')}` : '';
+  const art = inv.role === 'editor' ? 'an' : 'a';
+  $('#invite-lead').textContent = `${who} invited to a video conversation${withWho} — as ${art} ${inv.role}.`;
+  $('#invite-note').textContent = 'This link works once: joining ties it to your account.';
+  const join = $('#invite-join');
+  const watch = $('#invite-watch');
+  join.classList.remove('hidden');
+  watch.href = `/c/${inv.chatId}?invite=${encodeURIComponent(token)}`;
+  watch.classList.remove('hidden');
+  if (!inv.signedIn) {
+    if (!state.auth?.authEnabled) {
+      join.classList.add('hidden');
+      $('#invite-note').textContent = 'Sign-in isn\'t configured on this server, so invites can\'t be accepted.';
+      return;
+    }
+    join.textContent = 'Sign in to join';
+    join.onclick = () => {
+      wireAuthBox(`/i/${token}`);
+      $('#name-gate').classList.remove('hidden');
+    };
+  } else {
+    join.textContent = 'Join chat';
+    join.onclick = async () => {
+      join.disabled = true;
+      const res = await fetch(`/api/invites/${token}/accept`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) return location.replace(`/c/${data.chatId}`);
+      join.disabled = false;
+      if (data.code === 'used') $('#invite-lead').textContent = 'Someone else used this invite first.';
+      else showToast(data.error || "Couldn't join this chat");
+    };
+  }
+}
+
+// ---------- push notifications ----------
+const b64uToBytes = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+
+async function initPush() {
+  if (!('serviceWorker' in navigator)) return;
+  let reg;
+  try {
+    reg = await navigator.serviceWorker.register('/sw.js');
+  } catch {
+    return;
+  }
+  if (!state.auth?.user || !state.auth?.pushKey || !('PushManager' in window)) return;
+  const bell = $('#bell-btn');
+  bell.classList.remove('hidden');
+  let sub = await reg.pushManager.getSubscription().catch(() => null);
+  const paint = () => {
+    bell.textContent = sub ? '🔔' : '🔕';
+    bell.title = sub ? 'Notifications on — tap to turn off' : 'Get notified about new messages';
+    bell.classList.toggle('bell-on', !!sub);
+  };
+  paint();
+  bell.onclick = async () => {
+    try {
+      if (sub) {
+        await fetch('/api/push/unsubscribe', {
+          method: 'POST', headers: JSONH, body: JSON.stringify({ endpoint: sub.endpoint }),
+        });
+        await sub.unsubscribe();
+        sub = null;
+        showToast('Notifications off');
+      } else {
+        if ((await Notification.requestPermission()) !== 'granted') {
+          return showToast('Notifications are blocked for this site in your browser');
+        }
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: b64uToBytes(state.auth.pushKey),
+        });
+        await fetch('/api/push/subscribe', {
+          method: 'POST', headers: JSONH, body: JSON.stringify({ subscription: sub.toJSON() }),
+        });
+        showToast("Notifications on — you'll hear about new messages");
+      }
+      paint();
+    } catch {
+      showToast("Couldn't set up notifications on this device");
+    }
+  };
+}
 
 const escapeHtml = s => s.replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=40">
+  <link rel="stylesheet" href="/style.css?v=41">
 </head>
 <body>
 
@@ -25,8 +25,9 @@
       <a href="/" class="logo">splitty</a>
       <div class="header-actions">
         <button id="gaps-btn" class="btn-ghost" title="Show or hide pauses in transcripts">Hide pauses</button>
+        <button id="bell-btn" class="btn-ghost hidden" title="Notifications"></button>
         <button id="name-btn" class="btn-ghost" title="Change your display name"></button>
-        <button id="copy-link" class="btn-ghost">Copy invite link</button>
+        <button id="share-btn" class="btn-ghost">Share</button>
       </div>
     </header>
 
@@ -98,6 +99,79 @@
     </div>
   </div>
 
+  <!-- private chat, no access -->
+  <div id="locked" class="hidden">
+    <div class="landing-inner">
+      <h1>splitty</h1>
+      <p class="tagline" id="locked-msg">This chat is private.</p>
+      <button id="locked-request" class="btn-primary hidden">Request access</button>
+      <p id="locked-note" class="muted hidden">Request sent — you'll get in as soon as someone lets you in.</p>
+      <button id="locked-signin" class="btn-primary hidden">Sign in</button>
+      <p class="locked-home"><a href="/">← Home</a></p>
+    </div>
+  </div>
+
+  <!-- one-time invite landing (/i/:token) -->
+  <div id="invite-page" class="hidden">
+    <div class="landing-inner">
+      <h1>splitty</h1>
+      <p class="tagline" id="invite-lead">Checking this invite…</p>
+      <button id="invite-join" class="btn-primary hidden">Join chat</button>
+      <a id="invite-watch" class="btn-outline hidden" href="#">Watch without joining</a>
+      <p id="invite-note" class="muted"></p>
+    </div>
+  </div>
+
+  <!-- share panel -->
+  <div id="share-gate" class="hidden">
+    <div id="share-card">
+      <div id="share-head">
+        <h2>Share</h2>
+        <button id="share-close" class="btn-ghost" title="Close">✕</button>
+      </div>
+      <div id="share-body">
+        <label id="vis-row" class="hidden">
+          <input type="checkbox" id="vis-toggle">
+          <span><b>Public link</b><br><small class="muted">Anyone with the link can watch. Off, it's invite-only.</small></span>
+        </label>
+        <button id="share-copy" class="btn-outline">Copy chat link</button>
+        <button id="share-ask" class="btn-primary hidden">Ask to join this chat</button>
+
+        <div id="share-requests-wrap" class="hidden">
+          <h3>Wants to join</h3>
+          <div id="share-requests"></div>
+        </div>
+
+        <div id="share-members-wrap" class="hidden">
+          <h3>People</h3>
+          <div id="share-members"></div>
+        </div>
+
+        <div id="share-invite-wrap" class="hidden">
+          <h3>Invite by link</h3>
+          <p class="share-note muted">Each link works exactly once. If the wrong person grabs it, revoke it — or kick them above.</p>
+          <form id="invite-form">
+            <input id="invite-name" type="text" maxlength="40" placeholder="Who's it for?">
+            <div class="invite-row">
+              <select id="invite-role">
+                <option value="commenter">Commenter — records &amp; watches</option>
+                <option value="viewer">Viewer — watch only</option>
+                <option value="editor">Editor — full control</option>
+              </select>
+              <button type="submit" class="btn-primary">Create link</button>
+            </div>
+          </form>
+          <div id="share-invites"></div>
+
+          <div id="share-friends-wrap" class="hidden">
+            <h3>People you've chatted with</h3>
+            <div id="share-friends"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- name gate / sign in -->
   <div id="name-gate" class="hidden">
     <div id="gate-card">
@@ -129,6 +203,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=40"></script>
+  <script src="/app.js?v=41"></script>
 </body>
 </html>
