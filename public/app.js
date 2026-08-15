@@ -761,6 +761,7 @@ function setRole(role) {
   document.body.classList.toggle('role-viewer', !canComment());
   const n = state.requests.length;
   $('#share-btn').textContent = canEdit() && n ? `Share (${n})` : 'Share';
+  paintPush(); // the notification nudge depends on the role (participants only)
   if (changed) {
     state.lastRenderKey = ''; // drag handles / delete buttons depend on the role
     if (!state.auth?.authEnabled) return;
@@ -2064,51 +2065,77 @@ async function initInvite(token) {
 // ---------- push notifications ----------
 const b64uToBytes = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
 
+// One subscription per device, tied to your account: it covers every chat
+// you're a member of. The bell toggles it; the floating banner nudges
+// signed-in participants who haven't turned it on here yet.
+const push = { reg: null, sub: null, supported: false };
+
 async function initPush() {
   if (!('serviceWorker' in navigator)) return;
-  let reg;
   try {
-    reg = await navigator.serviceWorker.register('/sw.js');
+    push.reg = await navigator.serviceWorker.register('/sw.js');
   } catch {
     return;
   }
   if (!state.auth?.user || !state.auth?.pushKey || !('PushManager' in window)) return;
-  const bell = $('#bell-btn');
-  bell.classList.remove('hidden');
-  let sub = await reg.pushManager.getSubscription().catch(() => null);
-  const paint = () => {
-    bell.textContent = sub ? '🔔' : '🔕';
-    bell.title = sub ? 'Notifications on — tap to turn off' : 'Get notified about new messages';
-    bell.classList.toggle('bell-on', !!sub);
+  push.supported = true;
+  push.sub = await push.reg.pushManager.getSubscription().catch(() => null);
+  $('#bell-btn').classList.remove('hidden');
+  $('#bell-btn').onclick = () => (push.sub ? disablePush() : enablePush());
+  $('#push-banner-on').onclick = enablePush;
+  $('#push-banner-x').onclick = () => {
+    sessionStorage.setItem('splitty:pushnag', '1'); // quiet for this visit; nudges again next time
+    paintPush();
   };
-  paint();
-  bell.onclick = async () => {
-    try {
-      if (sub) {
-        await fetch('/api/push/unsubscribe', {
-          method: 'POST', headers: JSONH, body: JSON.stringify({ endpoint: sub.endpoint }),
-        });
-        await sub.unsubscribe();
-        sub = null;
-        showToast('Notifications off');
-      } else {
-        if ((await Notification.requestPermission()) !== 'granted') {
-          return showToast('Notifications are blocked for this site in your browser');
-        }
-        sub = await reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: b64uToBytes(state.auth.pushKey),
-        });
-        await fetch('/api/push/subscribe', {
-          method: 'POST', headers: JSONH, body: JSON.stringify({ subscription: sub.toJSON() }),
-        });
-        showToast("Notifications on — you'll hear about new messages");
-      }
-      paint();
-    } catch {
-      showToast("Couldn't set up notifications on this device");
+  paintPush();
+}
+
+async function enablePush() {
+  try {
+    if ((await Notification.requestPermission()) !== 'granted') {
+      showToast('Notifications are blocked for this site in your browser');
+      paintPush();
+      return;
     }
-  };
+    push.sub = await push.reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: b64uToBytes(state.auth.pushKey),
+    });
+    await fetch('/api/push/subscribe', {
+      method: 'POST', headers: JSONH, body: JSON.stringify({ subscription: push.sub.toJSON() }),
+    });
+    showToast("Notifications on — they cover all your chats");
+  } catch {
+    showToast("Couldn't set up notifications on this device");
+  }
+  paintPush();
+}
+
+async function disablePush() {
+  try {
+    await fetch('/api/push/unsubscribe', {
+      method: 'POST', headers: JSONH, body: JSON.stringify({ endpoint: push.sub.endpoint }),
+    });
+    await push.sub.unsubscribe();
+    push.sub = null;
+    showToast('Notifications off');
+  } catch {
+    showToast("Couldn't turn notifications off");
+  }
+  paintPush();
+}
+
+function paintPush() {
+  if (!push.supported) return;
+  const bell = $('#bell-btn');
+  bell.textContent = push.sub ? '🔔' : '🔕';
+  bell.title = push.sub ? 'Notifications on (all your chats) — tap to turn off' : 'Get notified about new messages';
+  bell.classList.toggle('bell-on', !!push.sub);
+  // the nudge: signed-in participants (can record here) without push on this
+  // device — viewers don't care, so they're never nagged
+  const show = !push.sub && !!state.auth?.user && !!state.auth?.authEnabled && canComment()
+    && Notification.permission !== 'denied' && !sessionStorage.getItem('splitty:pushnag');
+  $('#push-banner').classList.toggle('hidden', !show);
 }
 
 const escapeHtml = s => s.replace(/[&<>"']/g, c =>

@@ -475,3 +475,19 @@ body.role-viewer #splitter { bottom: 0; }
 
 #share-claim { width: 100%; margin: 4px 0 12px; }
 #share-claim-wrap { margin-top: 12px; }
+
+/* floating "turn on notifications" nudge — participants without push here */
+#push-banner {
+  position: fixed; top: 58px; left: 50%; transform: translateX(-50%); z-index: 80;
+  display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 24px);
+  background: var(--panel-2); border: 1px solid #2e3342; border-radius: 99px;
+  padding: 6px 8px 6px 14px; font-size: 13px; color: var(--muted);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35); white-space: nowrap;
+}
+#push-banner span { overflow: hidden; text-overflow: ellipsis; }
+#push-banner button {
+  background: none; border: 0; cursor: pointer; font-size: 13px;
+  padding: 2px 8px; border-radius: 99px; color: var(--accent); font-weight: 650;
+}
+#push-banner button:hover { background: var(--accent-soft); }
+#push-banner-x { color: var(--muted); font-weight: 400; }
