@@ -40,7 +40,11 @@ const players = [$('#player-a'), $('#player-b')];
 const preview = $('#preview');
 const activeEl = () => players[state.activeIdx];
 const standbyEl = () => players[state.activeIdx ^ 1];
-const mediaUrl = msg => `${location.origin}/media/${msg.file}`;
+const mediaUrl = msg => {
+  const b = blobStore.get(msg.file);
+  if (b) { b.last = ++blobTick; return b.url; }
+  return `${location.origin}/media/${msg.file}`;
+};
 
 // ---------- boot ----------
 // session first: signed-in users take their account name everywhere
@@ -70,6 +74,32 @@ fetch('/api/me')
 // a time, capped budget, skips Save-Data connections and hidden tabs.
 const prefetch = { done: new Set(), queue: [], running: false, bytes: 0, BUDGET: 80 * 1024 * 1024 };
 
+// In-memory blob store: mobile Chrome downgrades video preload to save data,
+// so feed the <video> elements blob: URLs — playback and seeks are fully local.
+const blobStore = new Map(); // file -> { url, size, last }
+let blobTick = 0, blobBytes = 0;
+const BLOB_BUDGET = 48 * 1024 * 1024;
+
+function storeBlob(file, blob) {
+  if (blobStore.has(file) || blob.size > 20 * 1024 * 1024) return;
+  blobStore.set(file, { url: URL.createObjectURL(blob), size: blob.size, last: ++blobTick });
+  blobBytes += blob.size;
+  // LRU eviction, never yanking a URL a player is currently using
+  while (blobBytes > BLOB_BUDGET) {
+    let oldest = null;
+    for (const [f, b] of blobStore) {
+      if (players.some(p => p.src === b.url)) continue;
+      if (!oldest || b.last < blobStore.get(oldest).last) oldest = f;
+    }
+    if (!oldest) break;
+    const b = blobStore.get(oldest);
+    URL.revokeObjectURL(b.url);
+    blobBytes -= b.size;
+    blobStore.delete(oldest);
+    prefetch.done.delete(oldest); // may be re-fetched later if needed
+  }
+}
+
 function enqueuePrefetch(files, front = false) {
   if (navigator.connection?.saveData) return;
   const fresh = files.filter(f => f && !prefetch.done.has(f) && !prefetch.queue.includes(f));
@@ -91,6 +121,7 @@ async function runPrefetch() {
         const buf = await res.blob(); // consuming the body lands it in the HTTP cache
         prefetch.bytes += buf.size;
         prefetch.done.add(file);
+        storeBlob(file, buf); // and keep it hot in memory for instant swaps
       }
     } catch { /* offline blip — drop it, playback will fetch on demand */ }
   }
