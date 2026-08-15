@@ -244,7 +244,10 @@ async function toggleScreen() {
   if (screenStream) return stopScreenShare();
   try {
     screenStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 15 } },
+      // capped at 1080p/10fps — screens are mostly still, and this keeps a
+      // 10-minute share under ~90MB. (A crisper HD preset could be a paid
+      // tier later: bump these caps + SCREEN_BITRATE together.)
+      video: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { ideal: 10, max: 15 } },
       audio: false, // the mic on the camera track is the voice
     });
   } catch {
@@ -525,6 +528,7 @@ function initChat() {
     if (e.target === $('#share-gate')) $('#share-gate').classList.add('hidden');
   });
   initPush();
+  restorePendingUploads();
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;
@@ -1446,6 +1450,7 @@ function remapPlayback() {
 
 // ---------- recording ----------
 const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced
+const SCREEN_BITRATE = 1_200_000; // 1080p10 screen content compresses fine at this
 
 async function toggleRecord() {
   if (state.rec) return stopRecord();
@@ -1495,7 +1500,7 @@ async function toggleRecord() {
   if (screenStream?.active) {
     screenRecorder = new MediaRecorder(screenStream, {
       ...(videoMime && { mimeType: videoMime }),
-      videoBitsPerSecond: 2_500_000, // screens need more bits than faces
+      videoBitsPerSecond: SCREEN_BITRATE,
     });
     screenRecorder.ondataavailable = e => e.data.size && sChunks.push(e.data);
   }
@@ -1568,6 +1573,8 @@ function stopRecord() {
 const uploader = { jobs: [], running: false, progress: null };
 
 function enqueueUpload(job) {
+  job.jid ||= Math.random().toString(36).slice(2);
+  savePending(job); // survives a refresh/crash — restorePendingUploads offers a resend
   uploader.jobs.push(job);
   runUploads();
   updateHint();
@@ -1584,13 +1591,15 @@ async function runUploads() {
       state.seen[message.id] = 10 * 60 * 60 * 1000;
       localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen));
       uploader.jobs.shift();
+      dropPending(job.jid);
       poll(); // pull the new message in; remapPlayback keeps our place if watching
     } catch (err) {
       uploader.jobs.shift();
       if (err.code === 'pending') showToast('Sent limit reached — an admin needs to approve you before you can send more.');
       else if (err.code === 'blocked') showToast('Your account is blocked from sending.');
+      else if (err.code === 'role') showToast("You don't have permission to record in this chat.");
       else if (err.code === 'auth') { showToast('Sign in to send messages.'); $('#name-gate').classList.remove('hidden'); }
-      else showToast('Upload failed.', 'Retry', () => enqueueUpload(job));
+      else showToast('Upload failed — the clip is saved here until it sends.', 'Retry', () => enqueueUpload(job));
     }
     uploader.progress = null;
     updateHint();
@@ -1598,39 +1607,135 @@ async function runUploads() {
   uploader.running = false;
 }
 
-async function uploadJob({ videoBlob, audioBlob, screenBlob, rec, durationMs }) {
+const jfetch = async (url, opts) => {
+  const res = await fetch(url, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(data.error || `http ${res.status}`), { code: data.code });
+  return data;
+};
+
+// Big files go up in 8MB parts (R2 multipart via the worker): no single
+// request ever hits the Worker body cap, and a flaky part just retries.
+const PART_SIZE = 8 * 1024 * 1024;
+
+async function chunkUpload(blob, onBytes) {
+  const { key, uploadId } = await jfetch(`/api/chats/${state.chatId}/uploads`, {
+    method: 'POST', headers: JSONH, body: JSON.stringify({ mime: blob.type }),
+  });
+  try {
+    const parts = [];
+    for (let off = 0, n = 1; off < blob.size; off += PART_SIZE, n++) {
+      const slice = blob.slice(off, off + PART_SIZE);
+      let attempt = 0, res;
+      for (;;) {
+        try {
+          res = await fetch(
+            `/api/chats/${state.chatId}/uploads/part?key=${key}&id=${encodeURIComponent(uploadId)}&n=${n}`,
+            { method: 'PUT', body: slice }
+          );
+          if (!res.ok) throw new Error(`part ${res.status}`);
+          break;
+        } catch (err) {
+          if (++attempt >= 3) throw err;
+          await new Promise(r => setTimeout(r, 1500 * attempt)); // network blip — same part again
+        }
+      }
+      parts.push({ partNumber: n, etag: (await res.json()).etag });
+      onBytes(slice.size);
+    }
+    await jfetch(`/api/chats/${state.chatId}/uploads/complete`, {
+      method: 'POST', headers: JSONH, body: JSON.stringify({ key, uploadId, parts }),
+    });
+    return key;
+  } catch (err) {
+    // leave nothing half-assembled in the bucket
+    fetch(`/api/chats/${state.chatId}/uploads/abort`, {
+      method: 'POST', headers: JSONH, body: JSON.stringify({ key, uploadId }),
+    }).catch(() => {});
+    throw err;
+  }
+}
+
+async function uploadJob(job) {
+  const { videoBlob, audioBlob, screenBlob, rec, durationMs } = job;
+  // finished keys are memoized on the job, so a Retry never redoes an upload
+  const total = videoBlob.size + (screenBlob?.size || 0);
+  let sent = (job.videoKey ? videoBlob.size : 0) + (job.screenKey ? screenBlob?.size || 0 : 0);
+  const onBytes = b => {
+    sent += b;
+    uploader.progress = Math.min(99, Math.max(1, Math.round((sent / total) * 100)));
+    updateHint();
+  };
+  if (!job.videoKey) job.videoKey = await chunkUpload(videoBlob, onBytes);
+  if (screenBlob && screenBlob.size && !job.screenKey) job.screenKey = await chunkUpload(screenBlob, onBytes);
+
+  // the message itself is now a small request: keys + the ~64kbps audio track
   const fd = new FormData();
-  fd.append('video', videoBlob, `note.${videoBlob.type.includes('mp4') ? 'mp4' : 'webm'}`);
+  fd.append('videoKey', job.videoKey);
+  if (job.screenKey) fd.append('screenKey', job.screenKey);
   if (audioBlob && audioBlob.size) {
     fd.append('audio', audioBlob, `audio.${audioBlob.type.includes('mp4') ? 'm4a' : 'webm'}`);
-  }
-  if (screenBlob && screenBlob.size) {
-    fd.append('screen', screenBlob, `screen.${screenBlob.type.includes('mp4') ? 'mp4' : 'webm'}`);
+    fd.append('gain', String(await measureGain(audioBlob)));
   }
   fd.append('author', state.name || 'anon');
   fd.append('durationMs', String(durationMs));
-  if (audioBlob && audioBlob.size) fd.append('gain', String(await measureGain(audioBlob)));
   if (rec.parentId) {
     fd.append('parentId', rec.parentId);
     fd.append('anchorMs', String(rec.anchorMs));
   }
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `/api/chats/${state.chatId}/messages`);
-    xhr.upload.onprogress = e => {
-      if (!e.lengthComputable) return;
-      uploader.progress = Math.round((e.loaded / e.total) * 100);
-      updateHint();
-    };
-    xhr.onload = () => {
-      if (xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
-      let err = {};
-      try { err = JSON.parse(xhr.responseText); } catch {}
-      reject(Object.assign(new Error(err.error || `upload ${xhr.status}`), { code: err.code }));
-    };
-    xhr.onerror = () => reject(new Error('network'));
-    xhr.send(fd);
-  });
+  return await jfetch(`/api/chats/${state.chatId}/messages`, { method: 'POST', body: fd });
+}
+
+// ---------- unsent-clip persistence ----------
+// Recordings live only in memory while uploading; IndexedDB keeps a copy (it
+// holds Blobs, unlike localStorage) so a refresh or crash can't eat a clip.
+const idbPending = async (mode, fn) => {
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('splitty', 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('pending', { keyPath: 'id' });
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    const out = await new Promise((resolve, reject) => {
+      const tx = db.transaction('pending', mode);
+      const req = fn(tx.objectStore('pending'));
+      tx.oncomplete = () => resolve(req?.result);
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    return out;
+  } catch {
+    return null; // private browsing etc. — persistence is best-effort
+  }
+};
+
+const savePending = job => idbPending('readwrite', s => s.put({
+  id: job.jid, chatId: state.chatId, ts: Date.now(),
+  videoBlob: job.videoBlob, audioBlob: job.audioBlob, screenBlob: job.screenBlob,
+  durationMs: job.durationMs, parentId: job.rec.parentId, anchorMs: job.rec.anchorMs,
+}));
+const dropPending = jid => idbPending('readwrite', s => s.delete(jid));
+
+async function restorePendingUploads() {
+  const rows = await idbPending('readonly', s => s.getAll());
+  if (!rows?.length) return;
+  const mine = [];
+  for (const r of rows) {
+    if (Date.now() - r.ts > 7 * 24 * 3600 * 1000) dropPending(r.id); // stale — let it go
+    else if (r.chatId === state.chatId) mine.push(r);
+  }
+  if (!mine.length) return;
+  showToast(
+    mine.length > 1 ? `${mine.length} clips from earlier never finished sending` : 'A clip from earlier never finished sending',
+    'Send now',
+    () => mine.forEach(r => enqueueUpload({
+      jid: r.id,
+      videoBlob: r.videoBlob, audioBlob: r.audioBlob, screenBlob: r.screenBlob,
+      durationMs: r.durationMs,
+      rec: { parentId: r.parentId, anchorMs: r.anchorMs, resume: null },
+    }))
+  );
 }
 
 // a pending upload would be lost if the tab closes now

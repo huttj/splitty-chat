@@ -759,6 +759,53 @@ export default {
         return json({ ok: true });
       }
 
+      // ---- chunked uploads (R2 multipart) ----
+      // Long recordings and screen shares are too big for one Worker request
+      // (body cap + form parsing buffers in memory), so the client uploads
+      // 8MB parts straight through to R2, then references the finished keys
+      // when it creates the message.
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/uploads(\/[a-z]+)?$/))) {
+        const gate = await uploadGate(request, env, m[1]);
+        if (gate) return gate;
+        const action = m[2] || '';
+
+        if (action === '' && request.method === 'POST') {
+          const { mime } = await request.json();
+          const clean = String(mime || 'video/webm').split(';')[0];
+          const ext = { 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[clean] || 'webm';
+          const key = `${slug(16)}.${ext}`;
+          const mpu = await env.MEDIA.createMultipartUpload(key, { httpMetadata: { contentType: clean } });
+          return json({ key, uploadId: mpu.uploadId });
+        }
+
+        if (action === '/part' && request.method === 'PUT') {
+          const key = url.searchParams.get('key') || '';
+          const id = url.searchParams.get('id') || '';
+          const n = Number(url.searchParams.get('n'));
+          if (!UPLOAD_KEY_RE.test(key) || !id || !(n >= 1 && n <= 10000)) return json({ error: 'bad part' }, 400);
+          const part = await env.MEDIA.resumeMultipartUpload(key, id).uploadPart(n, request.body);
+          return json({ etag: part.etag });
+        }
+
+        if (action === '/complete' && request.method === 'POST') {
+          const { key, uploadId, parts } = await request.json();
+          if (!UPLOAD_KEY_RE.test(key || '') || !uploadId || !Array.isArray(parts) || !parts.length) {
+            return json({ error: 'bad complete' }, 400);
+          }
+          await env.MEDIA.resumeMultipartUpload(key, uploadId)
+            .complete(parts.map(p => ({ partNumber: Number(p.partNumber), etag: String(p.etag) })));
+          return json({ ok: true });
+        }
+
+        if (action === '/abort' && request.method === 'POST') {
+          const { key, uploadId } = await request.json();
+          if (UPLOAD_KEY_RE.test(key || '') && uploadId) {
+            await env.MEDIA.resumeMultipartUpload(key, uploadId).abort().catch(() => {});
+          }
+          return json({ ok: true });
+        }
+      }
+
       if ((m = pathname.match(/^\/media\/([A-Za-z0-9_.-]+)$/)) && (request.method === 'GET' || request.method === 'HEAD')) {
         return await serveMedia(request, env, m[1]);
       }
@@ -772,6 +819,33 @@ export default {
 };
 
 const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced — 10 minutes each
+const UPLOAD_KEY_RE = /^[A-Za-z0-9_-]{16}\.(webm|mp4|mov)$/;
+
+// chunked-upload routes share the message-posting gate: signed-in, not
+// blocked, commenter or better in this chat (name-only mode stays open)
+async function uploadGate(request, env, chatId) {
+  const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(chatId).first();
+  if (!chat) return json({ error: 'not found' }, 404);
+  if (!authEnabled(env)) return null;
+  const user = await getUser(request, env);
+  if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
+  if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+  const access = await chatAccess(env, user, chat);
+  if (!roleAtLeast(access.role, 'commenter')) return json({ error: 'no permission to record here', code: 'role' }, 403);
+  return null;
+}
+
+// a client-supplied key must be a real, freshly uploaded object that no
+// message already points at — never a way to alias someone else's file
+async function claimUploadedKey(env, key) {
+  if (typeof key !== 'string' || !UPLOAD_KEY_RE.test(key)) return null;
+  const head = await env.MEDIA.head(key);
+  if (!head) return null;
+  const ref = await env.DB.prepare('SELECT 1 AS x FROM messages WHERE video_key = ? OR screen_key = ?')
+    .bind(key, key).first();
+  if (ref) return null;
+  return { key, mime: head.httpMetadata?.contentType || 'video/webm' };
+}
 
 async function createMessage(request, env, ctx, chatId) {
   const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(chatId).first();
@@ -799,25 +873,38 @@ async function createMessage(request, env, ctx, chatId) {
   const form = await request.formData();
   const video = form.get('video');
   const audio = form.get('audio'); // small audio-only track for transcription
-  if (!(video instanceof File)) return json({ error: 'missing video' }, 400);
   // 30s of slack over the client's auto-stop covers recorder stop latency
   if (Number(form.get('durationMs')) > MAX_RECORD_MS + 30_000) {
     return json({ error: 'recordings are capped at 10 minutes', code: 'toolong' }, 400);
   }
 
-  const extFor = m => ({ 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[m] || 'webm');
-  const mime = (video.type || 'video/webm').split(';')[0];
-  const videoKey = `${slug(16)}.${extFor(mime)}`;
+  const extFor = mm => ({ 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[mm] || 'webm');
 
-  await env.MEDIA.put(videoKey, video.stream(), { httpMetadata: { contentType: mime } });
+  // preferred path: the client already chunk-uploaded the big files to R2
+  // and hands us their keys; fallback: small inline files (legacy/dev)
+  let videoKey, mime, screenKey = null;
+  const preVideo = await claimUploadedKey(env, form.get('videoKey'));
+  if (preVideo) {
+    videoKey = preVideo.key;
+    mime = preVideo.mime;
+  } else {
+    if (!(video instanceof File)) return json({ error: 'missing video' }, 400);
+    mime = (video.type || 'video/webm').split(';')[0];
+    videoKey = `${slug(16)}.${extFor(mime)}`;
+    await env.MEDIA.put(videoKey, video.stream(), { httpMetadata: { contentType: mime } });
+  }
 
   // optional companion screen-share track (camera carries the audio)
-  const screen = form.get('screen');
-  let screenKey = null;
-  if (screen instanceof File && screen.size > 0) {
-    const smime = (screen.type || 'video/webm').split(';')[0];
-    screenKey = `${slug(16)}.${extFor(smime)}`;
-    await env.MEDIA.put(screenKey, screen.stream(), { httpMetadata: { contentType: smime } });
+  const preScreen = await claimUploadedKey(env, form.get('screenKey'));
+  if (preScreen) {
+    screenKey = preScreen.key;
+  } else {
+    const screen = form.get('screen');
+    if (screen instanceof File && screen.size > 0) {
+      const smime = (screen.type || 'video/webm').split(';')[0];
+      screenKey = `${slug(16)}.${extFor(smime)}`;
+      await env.MEDIA.put(screenKey, screen.stream(), { httpMetadata: { contentType: smime } });
+    }
   }
 
   const parentId = form.get('parentId') || null;
@@ -846,9 +933,18 @@ async function createMessage(request, env, ctx, chatId) {
 
   // transcribe after the response goes out; client polls for the result.
   // Push notifications wait for the transcript so they can quote the message.
-  const transcriptSource = audio instanceof File && audio.size > 0 ? audio : video;
-  const buf = await transcriptSource.arrayBuffer();
-  ctx.waitUntil(transcribe(env, msg.id, buf).then(() => notifyNewMessage(env, msg)));
+  // Chunk-uploaded messages always ship the small audio track; if it's somehow
+  // missing and there's no inline video, skip transcription rather than pull
+  // a huge file back out of R2 into Worker memory.
+  const transcriptSource = audio instanceof File && audio.size > 0 ? audio
+    : video instanceof File ? video : null;
+  if (transcriptSource) {
+    const buf = await transcriptSource.arrayBuffer();
+    ctx.waitUntil(transcribe(env, msg.id, buf).then(() => notifyNewMessage(env, msg)));
+  } else {
+    await env.DB.prepare("UPDATE messages SET transcript_status = 'failed' WHERE id = ?").bind(msg.id).run();
+    ctx.waitUntil(notifyNewMessage(env, msg));
+  }
 
   return json({ message: msg });
 }
