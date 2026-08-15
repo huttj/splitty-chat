@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=41">
+  <link rel="stylesheet" href="/style.css?v=42">
 </head>
 <body>
 
@@ -130,6 +130,13 @@
         <button id="share-close" class="btn-ghost" title="Close">✕</button>
       </div>
       <div id="share-body">
+        <div id="share-claim-wrap" class="hidden">
+          <p class="share-note muted">This chat is from before sharing controls existed — anyone signed in can
+            still record here. Turning them on makes you the owner, adds everyone who has posted as a
+            commenter, and keeps the link watchable until you flip it private.</p>
+          <button id="share-claim" class="btn-primary">Turn on sharing controls</button>
+          <p id="share-claim-note" class="share-note muted hidden">Sign in first — then whoever has posted here can set this up.</p>
+        </div>
         <label id="vis-row" class="hidden">
           <input type="checkbox" id="vis-toggle">
           <span><b>Public link</b><br><small class="muted">Anyone with the link can watch. Off, it's invite-only.</small></span>
@@ -203,6 +210,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=41"></script>
+  <script src="/app.js?v=42"></script>
 </body>
 </html>

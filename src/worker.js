@@ -576,6 +576,38 @@ export default {
         });
       }
 
+      // upgrade a legacy (pre-access-control) chat: claimer becomes owner,
+      // everyone who has posted from an account is backfilled as a commenter.
+      // Visibility starts public so the link keeps working until the owner
+      // decides otherwise.
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/claim$/)) && request.method === 'POST') {
+        if (!authEnabled(env)) return json({ error: 'sharing controls need sign-in configured' }, 400);
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        if (chat.owner_id) return json({ error: 'this chat already has sharing set up' }, 409);
+        const user = await getUser(request, env);
+        if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
+        if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+        const { results: msgs } = await env.DB
+          .prepare('SELECT DISTINCT user_id, author FROM messages WHERE chat_id = ?').bind(chat.id).all();
+        const participated = msgs.some(r => r.user_id === user.id || sameAuthor(r.author, user.name));
+        if (!participated && msgs.length && !isAdmin(env, user)) {
+          return json({ error: 'only someone who has posted in this chat can set up sharing' }, 403);
+        }
+        await env.DB.prepare("UPDATE chats SET owner_id = ?, visibility = 'public' WHERE id = ?")
+          .bind(user.id, chat.id).run();
+        await env.DB.prepare(
+          "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, added_by, created_at) VALUES (?, ?, 'editor', ?, ?)"
+        ).bind(chat.id, user.id, user.id, Date.now()).run();
+        // silent backfill — these people are already in the conversation
+        for (const uid of new Set(msgs.map(r => r.user_id).filter(id => id && id !== user.id))) {
+          await env.DB.prepare(
+            "INSERT OR IGNORE INTO chat_members (chat_id, user_id, role, added_by, created_at) VALUES (?, ?, 'commenter', ?, ?)"
+          ).bind(chat.id, uid, user.id, Date.now()).run();
+        }
+        return json({ ok: true });
+      }
+
       if ((m = pathname.match(/^\/api\/invites\/([A-Za-z0-9_-]+)\/accept$/)) && request.method === 'POST') {
         const inv = await env.DB.prepare('SELECT * FROM invites WHERE token = ?').bind(m[1]).first();
         if (!inv) return json({ error: 'invite not found' }, 404);

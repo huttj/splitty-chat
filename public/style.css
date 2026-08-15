@@ -472,3 +472,6 @@ body.role-viewer #controls { display: none; }
 body.role-viewer #splitter { bottom: 0; }
 
 #bell-btn.bell-on { color: var(--accent); }
+
+#share-claim { width: 100%; margin: 4px 0 12px; }
+#share-claim-wrap { margin-top: 12px; }

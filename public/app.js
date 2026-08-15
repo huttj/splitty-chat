@@ -463,9 +463,10 @@ function initChat() {
   state.seen = JSON.parse(localStorage.getItem(`splitty:seen:${state.chatId}`) || '{}');
   state.inviteToken = new URLSearchParams(location.search).get('invite');
   $('#chat').classList.remove('hidden');
-  // share opens the panel on access-controlled chats, else just copies the link
+  // share opens the panel whenever auth exists (legacy chats get the setup
+  // pitch inside); name-only mode just copies the link
   $('#share-btn').onclick = () => {
-    if (state.auth?.authEnabled && state.chatMeta?.ownerId) return openShare();
+    if (state.auth?.authEnabled && state.chatMeta) return openShare();
     copyChatLink($('#share-btn'), 'Share');
   };
   $('#share-close').onclick = () => $('#share-gate').classList.add('hidden');
@@ -1787,10 +1788,34 @@ function renderShare() {
   // polls call this every 2.5s while the panel is open — only rebuild the DOM
   // when the underlying data changed, so open menus/half-typed text survive
   const key = JSON.stringify([
-    editor, state.chatMeta?.visibility, state.members, state.invites, state.requests, state.friends,
+    editor, state.chatMeta?.ownerId, state.chatMeta?.visibility,
+    state.members, state.invites, state.requests, state.friends,
   ]);
   if (key === lastShareKey) return;
   lastShareKey = key;
+
+  // legacy chat: no owner yet — offer to switch sharing controls on
+  const legacy = !state.chatMeta?.ownerId;
+  $('#share-claim-wrap').classList.toggle('hidden', !legacy);
+  if (legacy) {
+    for (const id of ['#vis-row', '#share-ask', '#share-requests-wrap', '#share-members-wrap', '#share-invite-wrap']) {
+      $(id).classList.add('hidden');
+    }
+    $('#share-copy').onclick = () => copyChatLink($('#share-copy'), 'Copy chat link');
+    const signedIn = !!state.auth?.user;
+    $('#share-claim').classList.toggle('hidden', !signedIn);
+    $('#share-claim-note').classList.toggle('hidden', signedIn);
+    $('#share-claim').onclick = async () => {
+      $('#share-claim').disabled = true;
+      const res = await fetch(`/api/chats/${state.chatId}/claim`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      $('#share-claim').disabled = false;
+      if (!res.ok) return showToast(data.error || "Couldn't set up sharing");
+      showToast("Sharing is on — you're the owner now");
+      await poll(); // panel repaints with the full member/invite UI
+    };
+    return;
+  }
 
   $('#vis-row').classList.toggle('hidden', !editor);
   const vis = $('#vis-toggle');
