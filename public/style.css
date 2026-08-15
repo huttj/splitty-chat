@@ -119,13 +119,15 @@ body {
 #video-box video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 #preview { transform: scaleX(-1); }
 /* while someone else plays, your camera shrinks to a corner PiP (tap to resize) */
-#video-box.mode-play #preview {
+#video-box.mode-play #preview,
+#video-box.mode-screenlive #preview {
   inset: 8px 8px auto auto; width: 22%; height: auto; aspect-ratio: 3/4;
   border-radius: 10px; border: 1px solid rgba(255,255,255,0.3); z-index: 3;
   box-shadow: 0 4px 14px rgba(0,0,0,0.5); cursor: pointer;
   transition: width 0.15s ease;
 }
 #video-box.mode-play.pip-mini #preview { width: 12%; }
+#video-box.mode-screenlive.pip-mini #preview { width: 12%; }
 #video-box.mode-record { outline: 2px solid var(--rec); outline-offset: -2px; }
 /* fit toggle: contain letterboxes so faces never get cropped away */
 #video-box.fit-contain video { object-fit: contain; }
@@ -491,3 +493,32 @@ body.role-viewer #splitter { bottom: 0; }
 }
 #push-banner button:hover { background: var(--accent-soft); }
 #push-banner-x { color: var(--muted); font-weight: 400; }
+
+/* ---------- screen sharing ---------- */
+/* screens are letterboxed, never cropped — text must stay readable */
+#screen-player { object-fit: contain; background: #000; z-index: 2; }
+#video-box.mode-screenlive #screen-player { z-index: 1; } /* under the corner cam preview */
+
+/* the little draggable video during screen playback (tap = swap big/small) */
+#video-box.mode-screen .spip {
+  inset: auto;
+  left: var(--spip-x, 12px); top: var(--spip-y, 12px);
+  width: 24%; max-width: 240px; min-width: 100px; height: auto; aspect-ratio: 4/3;
+  border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.3); z-index: 5;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5); cursor: grab; object-fit: cover;
+  touch-action: none;
+}
+#video-box.mode-screen #screen-player.spip { object-fit: contain; background: #000; }
+#video-box.mode-screen .spip:active { cursor: grabbing; }
+
+/* screen-share toggle in the footer: outlined like stop, accent when armed */
+#screen-btn {
+  width: 46px; height: 46px; border-radius: 50%; border: 2px solid #3a3f4e;
+  background: var(--panel-2); color: var(--muted); cursor: pointer;
+  display: grid; place-items: center; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+#screen-btn .ic { width: 20px; height: 20px; }
+#screen-btn:hover { color: var(--text); }
+#screen-btn.screen-on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+.screen-tag { font-size: 12px; opacity: 0.8; }

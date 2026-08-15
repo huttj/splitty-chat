@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=45">
+  <link rel="stylesheet" href="/style.css?v=46">
 </head>
 <body>
 
@@ -41,6 +41,7 @@
       <div id="video-box">
         <video id="player-a" playsinline></video>
         <video id="player-b" playsinline class="hidden"></video>
+        <video id="screen-player" playsinline muted class="hidden"></video>
         <video id="preview" playsinline muted class="hidden"></video>
         <div id="pip-label"></div>
         <button id="fit-btn" title="Toggle fill / fit">Fit</button>
@@ -81,6 +82,9 @@
       <div id="rec-hint"></div>
       <button id="stop-btn" class="hidden" title="Stop — next recording starts a new message">
         <span class="stop-square"></span>
+      </button>
+      <button id="screen-btn" class="hidden" title="Record your screen (camera + mic keep going as a PiP)">
+        <svg class="ic" viewBox="0 0 16 16"><path d="M1.5 2.5h13a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H9.8l.4 1.5h1.3a.75.75 0 0 1 0 1.5H4.5a.75.75 0 0 1 0-1.5h1.3l.4-1.5H1.5a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1zm.5 1.5v7h12V4H2z"/></svg>
       </button>
       <button id="rec-btn" aria-label="record">
         <span class="rec-dot"></span>
@@ -216,6 +220,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=45"></script>
+  <script src="/app.js?v=46"></script>
 </body>
 </html>

@@ -32,7 +32,10 @@ const state = {
   friends: null,     // lazy-loaded for the share panel
   inviteToken: null, // ?invite= view-only credential for private chats
   roleInit: false,   // first-poll gate/camera decision made
+  screenSwap: false, // screen-share playback: false = screen big, true = camera big
 };
+
+let lastPipSwap = 0; // suppress the click that trails a PiP swap tap
 
 const ROLE_RANK = { viewer: 1, commenter: 2, editor: 3 };
 // can this person record here? (name-only dev mode stays open)
@@ -221,6 +224,54 @@ async function measureGain(blob) {
 // ---------- always-on camera ----------
 let camStream = null;
 let camError = null;
+// screen sharing is a mode, not a one-shot: while the stream is live, every
+// recording captures it alongside the camera (which keeps carrying the mic)
+let screenStream = null;
+const screenEl = () => $('#screen-player');
+
+async function toggleScreen() {
+  if (state.rec) {
+    if (state.rec.screenRecorder) {
+      // turning the share off mid-clip ends the clip — the screen track is
+      // part of what's being recorded
+      stopRecord();
+      stopScreenShare();
+    } else {
+      showToast('Finish this clip first — then turn on screen sharing');
+    }
+    return;
+  }
+  if (screenStream) return stopScreenShare();
+  try {
+    screenStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 15 } },
+      audio: false, // the mic on the camera track is the voice
+    });
+  } catch {
+    return; // picker dismissed
+  }
+  // the browser's own floating "Stop sharing" button
+  screenStream.getVideoTracks()[0].onended = () => {
+    if (state.rec?.screenRecorder) stopRecord();
+    stopScreenShare();
+  };
+  updateStage();
+}
+
+function stopScreenShare() {
+  screenStream?.getTracks().forEach(t => t.stop());
+  screenStream = null;
+  updateStage();
+}
+
+function paintScreenBtn() {
+  const btn = $('#screen-btn');
+  btn.classList.toggle('hidden', !navigator.mediaDevices?.getDisplayMedia);
+  btn.classList.toggle('screen-on', !!screenStream?.active);
+  btn.title = screenStream
+    ? 'Screen sharing is on — recordings include it. Tap to turn off.'
+    : 'Share your screen — while it\'s on, recordings include it';
+}
 async function ensureCam() {
   if (camStream && camStream.active) return camStream;
   try {
@@ -494,8 +545,59 @@ function initChat() {
     applyGaps();
   };
 
+  $('#screen-btn').onclick = toggleScreen;
+
+  // the recorded screen track: pending-seek plumbing like the players
+  const sp = screenEl();
+  sp.addEventListener('loadedmetadata', () => {
+    if (sp._pendingSeek != null && !sp.srcObject) {
+      sp.currentTime = sp._pendingSeek;
+      sp._pendingSeek = null;
+    }
+    sp.playbackRate = state.speed;
+  });
+  sp.addEventListener('click', () => {
+    // big screen video = tap to pause; when it's the PiP, taps mean swap (handled below)
+    if (!sp.classList.contains('spip') && !sp.srcObject && performance.now() - lastPipSwap > 350) togglePause();
+  });
+
+  // drag the little video (sharer's face or the screen, whichever is small)
+  // anywhere in the box; a tap without movement swaps which one is big
+  $('#video-box').addEventListener('pointerdown', e => {
+    const pip = e.target;
+    if (!(pip instanceof HTMLVideoElement) || !pip.classList.contains('spip')) return;
+    e.preventDefault();
+    const box = $('#video-box');
+    const rect = box.getBoundingClientRect();
+    const start = { x: e.clientX, y: e.clientY };
+    let moved = false;
+    const onMove = ev => {
+      if (Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) > 8) moved = true;
+      if (!moved) return;
+      const pr = pip.getBoundingClientRect();
+      const x = Math.min(Math.max(ev.clientX - rect.left - pr.width / 2, 4), rect.width - pr.width - 4);
+      const y = Math.min(Math.max(ev.clientY - rect.top - pr.height / 2, 4), rect.height - pr.height - 4);
+      box.style.setProperty('--spip-x', `${x}px`);
+      box.style.setProperty('--spip-y', `${y}px`);
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', () => {
+      document.removeEventListener('pointermove', onMove);
+      if (!moved) {
+        state.screenSwap = !state.screenSwap;
+        lastPipSwap = performance.now();
+        updateStage();
+      }
+    }, { once: true });
+  });
+
   for (const el of players) {
-    el.addEventListener('click', () => togglePause());
+    el.addEventListener('click', () => {
+      // taps on the PiP are swap gestures, not pause — and ignore the click
+      // that trails a swap so it doesn't immediately pause the new big view
+      if (el.classList.contains('spip') || performance.now() - lastPipSwap < 350) return;
+      togglePause();
+    });
     el.addEventListener('timeupdate', e => e.target === activeEl() && onTimeUpdate());
     el.addEventListener('ended', e => e.target === activeEl() && advanceSegment(state.playIdx));
     el.addEventListener('error', e => {
@@ -811,6 +913,7 @@ function cueAt(idx, at, autoplay = false) {
   players.forEach(p => (p.playbackRate = state.speed));
   setMsgGain(el, msg);
   prepareNext(idx);
+  loadScreenFor(msg, at);
   updateStage();
   const vt = seg.vStart + (at - seg.start);
   $('#scrubber').value = vt;
@@ -1010,9 +1113,49 @@ function playSegment(idx, offset, autoplay = true) {
     true
   );
   state.playLabel = msg.author;
+  loadScreenFor(msg, at);
   updateStage();
   syncPlayButton();
   updateHint();
+}
+
+// ---------- screen-share playback ----------
+// The camera element is the master clock (it has the voice); the screen video
+// just follows it. Cheap to keep honest: seek on load, mirror play/pause, and
+// snap whenever drift exceeds a third of a second.
+function loadScreenFor(msg, at) {
+  if (!msg?.screenKey) return;
+  const sp = screenEl();
+  const surl = `${location.origin}/media/${msg.screenKey}`;
+  if (sp.srcObject) sp.srcObject = null; // playback takes the element over from live preview
+  if (sp.getAttribute('src') !== surl) {
+    sp._pendingSeek = at;
+    sp.preload = 'auto';
+    sp.src = surl;
+  } else if (sp.readyState >= 1) {
+    sp.currentTime = at;
+  } else {
+    sp._pendingSeek = at;
+  }
+  sp.muted = true;
+  sp.playbackRate = state.speed;
+}
+
+function tickScreenSync() {
+  if (state.playIdx < 0) return;
+  const seg = state.playlist[state.playIdx];
+  const msg = state.byId.get(seg?.id);
+  if (!msg?.screenKey) return;
+  const sp = screenEl();
+  if (sp.srcObject || sp.readyState < 1) return;
+  const el = activeEl();
+  if (el.paused) {
+    if (!sp.paused) sp.pause();
+  } else {
+    if (sp.paused) sp.play().catch(() => {});
+    if (Math.abs(sp.currentTime - el.currentTime) > 0.35) sp.currentTime = el.currentTime;
+  }
+  if (sp.playbackRate !== state.speed) sp.playbackRate = state.speed;
 }
 
 const segKey = seg => `${seg.id}@${seg.start.toFixed(3)}`;
@@ -1057,6 +1200,7 @@ function stopPlayback() {
   state.playing = false;
   state.playIdx = -1;
   for (const el of players) { el.pause(); el._preparedKey = null; }
+  screenEl().pause();
   updateStage();
   clearWordHighlight();
   syncPlayButton();
@@ -1208,6 +1352,7 @@ function tickHighlight() {
     }
   }
   focusWordAt(seg, el.currentTime, 'speaking');
+  tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);
 
@@ -1233,6 +1378,10 @@ function previewVirtual(vt) {
   } else {
     el.currentTime = at;
   }
+  // scrubbing through a screen share previews the screen frame too
+  screenEl().pause();
+  loadScreenFor(msg, at);
+  updateStage();
 }
 
 const fmtClock = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
@@ -1340,12 +1489,24 @@ async function toggleRecord() {
     new MediaStream(stream.getAudioTracks()),
     { ...(audioMime && { mimeType: audioMime }), audioBitsPerSecond: 64000 }
   );
+  // screen armed? record it too — same clock, no audio track of its own
+  let screenRecorder = null;
+  const sChunks = [];
+  if (screenStream?.active) {
+    screenRecorder = new MediaRecorder(screenStream, {
+      ...(videoMime && { mimeType: videoMime }),
+      videoBitsPerSecond: 2_500_000, // screens need more bits than faces
+    });
+    screenRecorder.ondataavailable = e => e.data.size && sChunks.push(e.data);
+  }
+
   const vChunks = [], aChunks = [];
   recorder.ondataavailable = e => e.data.size && vChunks.push(e.data);
   audioRecorder.ondataavailable = e => e.data.size && aChunks.push(e.data);
   let stoppedCount = 0;
+  const stopTarget = screenRecorder ? 3 : 2;
   const onStop = () => {
-    if (++stoppedCount < 2) return;
+    if (++stoppedCount < stopTarget) return;
     const rec = state.rec;
     const durationMs = Date.now() - rec.startTs;
     state.rec = null;
@@ -1360,6 +1521,7 @@ async function toggleRecord() {
     enqueueUpload({
       videoBlob: new Blob(vChunks, { type: recorder.mimeType }),
       audioBlob: new Blob(aChunks, { type: audioRecorder.mimeType }),
+      screenBlob: sChunks.length ? new Blob(sChunks, { type: screenRecorder.mimeType }) : null,
       rec,
       durationMs,
     });
@@ -1376,12 +1538,14 @@ async function toggleRecord() {
   };
   recorder.onstop = onStop;
   audioRecorder.onstop = onStop;
+  if (screenRecorder) screenRecorder.onstop = onStop;
 
   $('#rec-btn').classList.add('recording');
 
-  state.rec = { recorder, audioRecorder, startTs: Date.now(), parentId, anchorMs, resume };
+  state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume };
   recorder.start();
   audioRecorder.start();
+  screenRecorder?.start();
   updateStage();
   updateHint();
 }
@@ -1390,9 +1554,11 @@ function stopRecord() {
   const rec = state.rec;
   if (!rec) return;
   if (Date.now() - rec.startTs < 700) rec.discard = true;
-  rec.recorder.stop(); // uploadRecording fires once both recorders stop
+  rec.recorder.stop(); // the upload fires once every recorder has stopped
   rec.audioRecorder.stop();
-  // the camera stream stays live — it's the always-on preview
+  rec.screenRecorder?.stop();
+  // camera and screen streams stay live — camera is the always-on preview,
+  // and screen sharing is a mode that persists across clips until toggled off
   $('#rec-btn').classList.remove('recording');
 }
 
@@ -1432,11 +1598,14 @@ async function runUploads() {
   uploader.running = false;
 }
 
-async function uploadJob({ videoBlob, audioBlob, rec, durationMs }) {
+async function uploadJob({ videoBlob, audioBlob, screenBlob, rec, durationMs }) {
   const fd = new FormData();
   fd.append('video', videoBlob, `note.${videoBlob.type.includes('mp4') ? 'mp4' : 'webm'}`);
   if (audioBlob && audioBlob.size) {
     fd.append('audio', audioBlob, `audio.${audioBlob.type.includes('mp4') ? 'm4a' : 'webm'}`);
+  }
+  if (screenBlob && screenBlob.size) {
+    fd.append('screen', screenBlob, `screen.${screenBlob.type.includes('mp4') ? 'mp4' : 'webm'}`);
   }
   fd.append('author', state.name || 'anon');
   fd.append('durationMs', String(durationMs));
@@ -1484,7 +1653,8 @@ function updateHint(text) {
   if (text == null && state.rec) {
     const elapsed = Date.now() - state.rec.startTs;
     const s = Math.floor(elapsed / 1000);
-    text = `● Recording ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} — tap to send`;
+    const what = state.rec.screenRecorder ? 'Recording you + screen' : 'Recording';
+    text = `● ${what} ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} — tap to send`;
     const left = MAX_RECORD_MS - elapsed;
     if (left < 60_000) text += ` · ${Math.max(Math.ceil(left / 1000), 0)}s left`;
   }
@@ -1506,6 +1676,7 @@ function updateStage() {
   // record button telegraphs what it'll do: splice into the conversation vs new message
   $('#rec-btn').classList.toggle('splice', mode === 'play');
   $('#stop-btn').classList.toggle('hidden', mode !== 'play');
+  paintScreenBtn();
   if (mode === 'none') { stage.classList.add('hidden'); return; }
   if (mode === 'enable') {
     // camera not granted yet: keep the stage visible with the enable button
@@ -1519,6 +1690,29 @@ function updateStage() {
   stage.classList.remove('hidden');
   box.classList.toggle('mode-play', mode === 'play');
   box.classList.toggle('mode-record', mode === 'record');
+
+  // screen layers: live share preview while idle/recording, or the recorded
+  // screen track of whatever's playing
+  const seg = mode === 'play' && state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
+  const curMsg = seg ? state.byId.get(seg.id) : null;
+  const screenPlay = mode === 'play' && !!curMsg?.screenKey;
+  const screenLive = mode !== 'play' && !!screenStream?.active;
+  const sp = screenEl();
+  if (screenLive && sp.srcObject !== screenStream) {
+    sp.removeAttribute('src');
+    sp.srcObject = screenStream;
+    sp.play().catch(() => {});
+  }
+  if (!screenLive && sp.srcObject) sp.srcObject = null;
+  if (!screenPlay && !screenLive && !sp.paused) sp.pause(); // moved on to a screen-less message
+  box.classList.toggle('mode-screen', screenPlay);
+  box.classList.toggle('mode-screenlive', screenLive);
+  sp.classList.toggle('hidden', !(screenPlay || screenLive));
+  // which video is the little draggable one (tap it to swap)
+  players.forEach(p => p.classList.remove('spip'));
+  sp.classList.remove('spip');
+  if (screenPlay) (state.screenSwap ? sp : activeEl()).classList.add('spip');
+
   preview.classList.toggle('hidden', !camStream);
   activeEl().classList.toggle('hidden', mode !== 'play');
   standbyEl().classList.add('hidden');
@@ -1655,6 +1849,7 @@ function renderMessage(msg, depth) {
     <span class="author"></span>
     <span class="time">${fmtTime(msg.createdAt)}</span>
     <span class="dur">${fmtClock(msgDur(msg))}</span>
+    ${msg.screenKey ? '<span class="screen-tag" title="Includes a screen share">🖥</span>' : ''}
     ${isNew ? '<span class="badge">new</span>' : ''}
     <span class="spacer"></span>
     ${(mine || canEdit()) && depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}

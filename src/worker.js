@@ -190,6 +190,7 @@ const rowToMessage = r => ({
   transcriptStatus: r.transcript_status,
   gain: r.gain ?? 1,
   picture: r.picture || null,
+  screenKey: r.screen_key || null,
 });
 
 export default {
@@ -413,8 +414,8 @@ export default {
 
       if ((m = pathname.match(/^\/api\/admin\/chats\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
         const { results } = await env.DB
-          .prepare('SELECT video_key FROM messages WHERE chat_id = ?').bind(m[1]).all();
-        const keys = results.map(r => r.video_key);
+          .prepare('SELECT video_key, screen_key FROM messages WHERE chat_id = ?').bind(m[1]).all();
+        const keys = results.flatMap(r => [r.video_key, r.screen_key]).filter(Boolean);
         for (let i = 0; i < keys.length; i += 1000) {
           await env.MEDIA.delete(keys.slice(i, i + 1000));
         }
@@ -736,7 +737,7 @@ export default {
         const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
         if (!chat) return json({ error: 'not found' }, 404);
         const row = await env.DB
-          .prepare('SELECT author, user_id, parent_id, anchor_ms, video_key FROM messages WHERE id = ? AND chat_id = ?')
+          .prepare('SELECT author, user_id, parent_id, anchor_ms, video_key, screen_key FROM messages WHERE id = ? AND chat_id = ?')
           .bind(m[2], m[1]).first();
         if (!row) return json({ error: 'not found' }, 404);
         const body = await request.json();
@@ -753,7 +754,7 @@ export default {
           await env.DB.prepare('UPDATE messages SET parent_id = NULL, anchor_ms = NULL WHERE parent_id = ?')
             .bind(m[2]).run();
         }
-        await env.MEDIA.delete(row.video_key);
+        await env.MEDIA.delete([row.video_key, row.screen_key].filter(Boolean));
         await env.DB.prepare('DELETE FROM messages WHERE id = ?').bind(m[2]).run();
         return json({ ok: true });
       }
@@ -804,11 +805,20 @@ async function createMessage(request, env, ctx, chatId) {
     return json({ error: 'recordings are capped at 10 minutes', code: 'toolong' }, 400);
   }
 
+  const extFor = m => ({ 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[m] || 'webm');
   const mime = (video.type || 'video/webm').split(';')[0];
-  const ext = { 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[mime] || 'webm';
-  const videoKey = `${slug(16)}.${ext}`;
+  const videoKey = `${slug(16)}.${extFor(mime)}`;
 
   await env.MEDIA.put(videoKey, video.stream(), { httpMetadata: { contentType: mime } });
+
+  // optional companion screen-share track (camera carries the audio)
+  const screen = form.get('screen');
+  let screenKey = null;
+  if (screen instanceof File && screen.size > 0) {
+    const smime = (screen.type || 'video/webm').split(';')[0];
+    screenKey = `${slug(16)}.${extFor(smime)}`;
+    await env.MEDIA.put(screenKey, screen.stream(), { httpMetadata: { contentType: smime } });
+  }
 
   const parentId = form.get('parentId') || null;
   const msg = {
@@ -820,6 +830,7 @@ async function createMessage(request, env, ctx, chatId) {
     mime,
     parentId,
     anchorMs: parentId ? Math.max(0, Number(form.get('anchorMs')) || 0) : null,
+    screenKey,
     durationMs: Number(form.get('durationMs')) || null,
     gain: Math.min(Math.max(Number(form.get('gain')) || 1, 0.25), 4),
     createdAt: Date.now(),
@@ -829,9 +840,9 @@ async function createMessage(request, env, ctx, chatId) {
   };
 
   await env.DB.prepare(
-    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, duration_ms, gain, created_at, transcript_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
-  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.durationMs, msg.gain, msg.createdAt).run();
+    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, duration_ms, gain, created_at, transcript_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, msg.durationMs, msg.gain, msg.createdAt).run();
 
   // transcribe after the response goes out; client polls for the result.
   // Push notifications wait for the transcript so they can quote the message.
