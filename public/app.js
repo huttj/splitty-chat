@@ -865,7 +865,9 @@ function playSegment(idx, offset, autoplay = true) {
     old.pause();
     if (el._launched) {
       el._launched = false;
-      if (Math.abs(el.currentTime - seg.start) > 0.2) el.currentTime = seg.start;
+      // resync only on real drift (rAF jank, blown estimates) — small overshoot
+      // plays through; a routine back-seek here reads as a stutter
+      if (Math.abs(el.currentTime - seg.start) > 0.4) el.currentTime = seg.start;
     } else {
       el.currentTime = seg.start; // parked early for overlap — snap to the real start
     }
@@ -1054,14 +1056,16 @@ function tickHighlight() {
   const seg = state.playlist[state.playIdx];
   if (!seg) return;
   if (!el.paused) {
-    const remain = (seg.end - el.currentTime) / (state.speed || 1);
+    // content-time on both sides: active and standby play at the same rate,
+    // so speed cancels out — never scale these thresholds by playbackRate
+    const remain = seg.end - el.currentTime;
     // frame-rate boundary enforcement: cut within ~16ms of the splice point.
     // File-end segments are exempt — the 'ended' event is the truth there,
     // since estimated duration can undershoot the real file.
     if (remain <= 0.015 && !isTailSeg(seg)) return advanceSegment(state.playIdx);
     // overlap launch: run the standby muted through the boundary so the swap
     // reveals an already-playing video instead of paying play() startup cost
-    if (remain <= LEAD) {
+    if (remain <= LEAD && remain > -1) {
       const nseg = state.playlist[state.playIdx + 1];
       const stb = standbyEl();
       if (nseg && !stb._launched && stb._preparedKey === segKey(nseg) && stb.readyState >= 1) {
