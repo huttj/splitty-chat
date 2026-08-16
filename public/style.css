@@ -697,10 +697,14 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 /* video-file drop target */
 #messages.drop-hot { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
 
-/* portrait video box: split stacks screen on top, camera below */
-#video-box.screen-split.split-v #screen-player:not(.spip) { inset: 0 0 50% 0; width: 100%; }
+/* portrait video box: split stacks screen on top, camera below.
+   Explicit heights: the base video rule's height:100% beats `bottom`, so
+   inset alone can't halve them. */
+#video-box.screen-split.split-v #screen-player:not(.spip) {
+  inset: 0 0 auto 0; width: 100%; height: 50%;
+}
 #video-box.screen-split.split-v video:not(#screen-player):not(#preview):not(.hidden) {
-  inset: 50% 0 0 0; width: 100%;
+  inset: auto 0 0 0; width: 100%; height: 50%;
 }
 
 /* one zoom level, everywhere: no double-tap zoom (scroll/scrub still work) */
