@@ -604,7 +604,7 @@ body.role-viewer #splitter { bottom: 0; }
 /* comment layers */
 #layer-pick { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #layer-pop {
-  position: fixed; top: 57px; left: 50%; transform: translateX(-50%); z-index: 95;
+  position: fixed; z-index: 95;
   background: var(--panel-2); border: 1px solid #2a2e3a; border-radius: 12px;
   padding: 8px; min-width: 230px; max-height: min(420px, 70dvh);
   display: flex; flex-direction: column; gap: 4px;
@@ -694,3 +694,7 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
   0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0.55); }
   50% { box-shadow: 0 0 0 12px rgba(124, 92, 255, 0); }
 }
+
+/* share panel action buttons stack full-width with breathing room */
+#share-ask, #share-fork { width: 100%; margin-top: 10px; }
+#share-fork-note { margin-top: 6px; }

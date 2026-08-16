@@ -417,7 +417,14 @@ export default {
       if ((m = pathname.match(/^\/api\/admin\/chats\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
         const { results } = await env.DB
           .prepare('SELECT video_key, screen_key, audio_key FROM messages WHERE chat_id = ?').bind(m[1]).all();
-        const keys = results.flatMap(r => [r.video_key, r.screen_key, r.audio_key]).filter(Boolean);
+        const keys = [];
+        for (const k of new Set(results.flatMap(r => [r.video_key, r.screen_key, r.audio_key]).filter(Boolean))) {
+          // spare anything a fork in another chat still points at
+          const ref = await env.DB.prepare(
+            'SELECT 1 AS x FROM messages WHERE (video_key = ? OR screen_key = ? OR audio_key = ?) AND chat_id != ?'
+          ).bind(k, k, k, m[1]).first();
+          if (!ref) keys.push(k);
+        }
         for (let i = 0; i < keys.length; i += 1000) {
           await env.MEDIA.delete(keys.slice(i, i + 1000));
         }
@@ -590,6 +597,44 @@ export default {
             : !inv.used_by ? 'open'
             : user && inv.used_by === user.id ? 'used-by-you' : 'used',
         });
+      }
+
+      // fork: your own copy of this conversation — base messages plus YOUR
+      // comment layer, flattened into a normal conversation you own. Media
+      // objects are shared by reference (they're immutable); deletion
+      // refcounts them so a fork never strands another chat's files.
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/fork$/)) && request.method === 'POST') {
+        if (!authEnabled(env)) return json({ error: 'forking needs sign-in configured' }, 400);
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
+        if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+        const access = await chatAccess(env, user, chat);
+        if (!access.role) return json({ error: 'no access to this chat' }, 403);
+        const { results } = await env.DB.prepare(
+          'SELECT * FROM messages WHERE chat_id = ? AND (layer_user_id IS NULL OR layer_user_id = ?) ORDER BY created_at'
+        ).bind(chat.id, user.id).all();
+        const newId = slug(12);
+        const idMap = new Map(results.map(r => [r.id, slug(12)]));
+        const stmts = [
+          env.DB.prepare("INSERT INTO chats (id, created_at, owner_id, visibility, comments) VALUES (?, ?, ?, 'private', 0)")
+            .bind(newId, Date.now(), user.id),
+          env.DB.prepare("INSERT INTO chat_members (chat_id, user_id, role, added_by, created_at) VALUES (?, ?, 'editor', ?, ?)")
+            .bind(newId, user.id, user.id, Date.now()),
+          ...results.map(r => env.DB.prepare(
+            `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms,
+               screen_key, audio_key, layer_user_id, duration_ms, gain, created_at, text, words, transcript_status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            idMap.get(r.id), newId, r.user_id, r.author, r.video_key, r.mime,
+            r.parent_id ? (idMap.get(r.parent_id) ?? null) : null, r.anchor_ms,
+            r.screen_key, r.audio_key, r.duration_ms, r.gain, r.created_at,
+            r.text, r.words, r.transcript_status
+          )),
+        ];
+        for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
+        return json({ id: newId });
       }
 
       // upgrade a legacy (pre-access-control) chat: claimer becomes owner,
@@ -809,7 +854,15 @@ export default {
           await env.DB.prepare('UPDATE messages SET parent_id = NULL, anchor_ms = NULL WHERE parent_id = ?')
             .bind(m[2]).run();
         }
-        await env.MEDIA.delete([row.video_key, row.screen_key, row.audio_key].filter(Boolean));
+        // forks share media by reference — only delete files nobody else uses
+        const doomed = [];
+        for (const k of [row.video_key, row.screen_key, row.audio_key].filter(Boolean)) {
+          const ref = await env.DB.prepare(
+            'SELECT 1 AS x FROM messages WHERE (video_key = ? OR screen_key = ? OR audio_key = ?) AND id != ?'
+          ).bind(k, k, k, m[2]).first();
+          if (!ref) doomed.push(k);
+        }
+        if (doomed.length) await env.MEDIA.delete(doomed);
         await env.DB.prepare('DELETE FROM messages WHERE id = ?').bind(m[2]).run();
         return json({ ok: true });
       }

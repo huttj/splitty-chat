@@ -634,31 +634,20 @@ function initChat() {
   });
   initPush();
   initMenu();
-  // layer picker popover: type-ahead over commenters
-  $('#layer-pick').onclick = () => {
-    const pop = $('#layer-pop');
-    pop.classList.toggle('hidden');
-    if (!pop.classList.contains('hidden')) {
-      $('#layer-search').value = '';
-      renderLayerList();
-      if (!$('#layer-search').classList.contains('hidden')) $('#layer-search').focus();
-    }
-  };
-  $('#layer-search').oninput = renderLayerList;
-  document.addEventListener('pointerdown', e => {
-    const pop = $('#layer-pop');
-    if (!pop.contains(e.target) && !$('#layer-pick').contains(e.target)) pop.classList.add('hidden');
-  });
   initTimeline();
   restorePendingUploads();
-  // layer picker popover: type-ahead over commenters
+
+  // layer picker popover: type-ahead over commenters, anchored to its button
   $('#layer-pick').onclick = () => {
     const pop = $('#layer-pop');
     pop.classList.toggle('hidden');
     if (!pop.classList.contains('hidden')) {
+      const r = $('#layer-pick').getBoundingClientRect();
+      pop.style.top = `${r.bottom + 6}px`;
+      pop.style.left = `${Math.max(12, Math.min(r.left, window.innerWidth - 260))}px`;
       $('#layer-search').value = '';
       renderLayerList();
-      if (!$('#layer-search').classList.contains('hidden')) $('#layer-search').focus();
+      $('#layer-search').focus();
     }
   };
   $('#layer-search').oninput = renderLayerList;
@@ -1788,8 +1777,6 @@ function renderLayerList() {
     };
     list.appendChild(row);
   }
-  // search only earns its space once there's a crowd
-  $('#layer-search').classList.toggle('hidden', layerEntries.length <= 7);
 }
 
 // view lens changed (time window, depth, layer, or a fold chip) — rebuild everything
@@ -2992,7 +2979,8 @@ function renderShare() {
   const legacy = !state.chatMeta?.ownerId;
   $('#share-claim-wrap').classList.toggle('hidden', !legacy);
   if (legacy) {
-    for (const id of ['#vis-row', '#comments-row', '#share-ask', '#share-requests-wrap', '#share-members-wrap', '#share-invite-wrap']) {
+    for (const id of ['#vis-row', '#comments-row', '#share-ask', '#share-fork', '#share-fork-note',
+      '#share-requests-wrap', '#share-members-wrap', '#share-invite-wrap']) {
       $(id).classList.add('hidden');
     }
     $('#share-copy').onclick = () => copyChatLink($('#share-copy'), 'Copy chat link');
@@ -3058,6 +3046,26 @@ function renderShare() {
     if (r.ok) {
       $('#share-ask').textContent = 'Asked — waiting for an editor';
       $('#share-ask').disabled = true;
+    }
+  };
+
+  // fork: anyone signed in with access can spin this conversation (plus
+  // their own comments, woven in) into a chat they own
+  const canFork = !!state.auth?.user && !!state.chatMeta?.ownerId;
+  $('#share-fork').classList.toggle('hidden', !canFork);
+  $('#share-fork-note').classList.toggle('hidden', !canFork);
+  $('#share-fork').onclick = async () => {
+    const btn = $('#share-fork');
+    btn.disabled = true;
+    btn.textContent = 'Forking…';
+    const res = await fetch(`/api/chats/${state.chatId}/fork`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.id) {
+      location.href = `/c/${data.id}`;
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Fork — make this conversation yours';
+      showToast(data.error || "Couldn't fork this chat");
     }
   };
 
