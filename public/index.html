@@ -45,7 +45,10 @@
       <label class="menu-row menu-check" title="Clip silences from transcripts and playback">
         <input type="checkbox" id="gaps-check"><span>Skip pauses</span>
       </label>
-      <label class="menu-row menu-check" title="Smooth loud/quiet swings within clips — adds audio latency, so phones default to off. Speaker volume leveling stays on either way.">
+      <label class="menu-row menu-check" title="Even out volume differences between speakers">
+        <input type="checkbox" id="level-check"><span>Level speakers</span>
+      </label>
+      <label class="menu-row menu-check" title="Smooth loud/quiet swings within clips — adds audio latency, so phones default to off">
         <input type="checkbox" id="comp-check"><span>Compressor</span>
       </label>
       <button id="bell-btn" class="menu-row hidden" title="Notifications"></button>
@@ -313,6 +316,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=90"></script>
+  <script src="/app.js?v=91"></script>
 </body>
 </html>

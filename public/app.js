@@ -274,8 +274,15 @@ function chatGainNorm() {
   return _maxGain.v;
 }
 
+let levelingOn = localStorage.getItem('splitty:leveling') !== '0'; // default on, everywhere
+
 function setMsgGain(el, msg) {
   const node = audioChainFor(el);
+  if (!levelingOn) {
+    if (node) node.gain.value = 1;
+    el.volume = 1;
+    return;
+  }
   if (node) {
     node.gain.value = msg?.gain || 1; // full boost/cut through the chain
     el.volume = 1;
@@ -478,7 +485,17 @@ function initMenu() {
   $('#lang-sel').value = localStorage.getItem('splitty:lang') || '';
   $('#lang-sel').onchange = () => localStorage.setItem('splitty:lang', $('#lang-sel').value);
 
-  // loudness leveling: flipping it after audio has been wired into WebAudio
+  // speaker leveling: applies live — re-set the gain on whatever's playing
+  const lvl = $('#level-check');
+  lvl.checked = levelingOn;
+  lvl.onchange = () => {
+    levelingOn = lvl.checked;
+    localStorage.setItem('splitty:leveling', levelingOn ? '1' : '0');
+    const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
+    if (seg) setMsgGain(activeEl(), state.byId.get(seg.id));
+  };
+
+  // compressor: flipping it after audio has been wired into WebAudio
   // needs a reload (elements can't be unwired), so reload when necessary
   const comp = $('#comp-check');
   comp.checked = compressorOn;
