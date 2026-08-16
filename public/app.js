@@ -1274,8 +1274,11 @@ function silencesFor(msg) {
   const sil = [];
   let prev = 0;
   const consider = (from, to) => {
+    // no fixed minimum-gap threshold: it EMERGES from the padding. A gap is
+    // clippable when ≥250ms of silence survives the shoulders, so the slider
+    // trades naturally — tight padding clips more pauses, loose clips fewer.
     const s = from + state.silPad, e = to - state.silPad / 2;
-    if (to - from >= 1.0 && e - s >= 0.25) sil.push([s, e]);
+    if (e - s >= 0.25) sil.push([s, e]);
   };
   for (const w of msg.words) {
     consider(prev, w.s);
