@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=61">
+  <link rel="stylesheet" href="/style.css?v=62">
 </head>
 <body>
 
@@ -24,7 +24,7 @@
     <header id="chat-header">
       <a href="/" class="logo">splitty</a>
       <div class="header-actions">
-        <select id="layer-sel" class="hidden" title="Whose comments you're viewing — recordings go where you're looking"></select>
+        <button id="layer-pick" class="btn-ghost hidden" title="Whose comments you're viewing — recordings go where you're looking"></button>
         <button id="screen-btn" class="btn-ghost hidden" title="Share your screen — while it's on, recordings include it">
           <svg class="ic" viewBox="0 0 16 16"><path d="M1.5 2A1.5 1.5 0 0 0 0 3.5v7A1.5 1.5 0 0 0 1.5 12h4.9l-.37 1.5H4.5a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-1.53L9.6 12h4.9a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 14.5 2h-13z"/></svg>
         </button>
@@ -35,6 +35,11 @@
         </button>
       </div>
     </header>
+
+    <div id="layer-pop" class="hidden">
+      <input id="layer-search" type="search" placeholder="Find a commenter…">
+      <div id="layer-list"></div>
+    </div>
 
     <div id="menu-pop" class="hidden">
       <button id="gaps-btn" class="menu-row" title="Show or hide pauses in transcripts">Hide pauses</button>
@@ -280,6 +285,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=61"></script>
+  <script src="/app.js?v=62"></script>
 </body>
 </html>

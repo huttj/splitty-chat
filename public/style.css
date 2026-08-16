@@ -606,11 +606,20 @@ body.role-viewer #splitter { bottom: 0; }
 .retr-btn:disabled { opacity: 0.4; cursor: default; }
 
 /* comment layers */
-#layer-sel {
-  background: var(--panel); color: var(--muted); border: 1px solid #2a2e3a;
-  border-radius: 9px; padding: 6px 8px; font-size: 13px; max-width: 180px; cursor: pointer;
+#layer-pick { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#layer-pop {
+  position: fixed; top: 52px; left: 50%; transform: translateX(-50%); z-index: 95;
+  background: var(--panel-2); border: 1px solid #2a2e3a; border-radius: 12px;
+  padding: 8px; min-width: 230px; max-height: min(420px, 70dvh);
+  display: flex; flex-direction: column; gap: 4px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
 }
-#layer-sel:hover { color: var(--text); }
+#layer-search {
+  padding: 8px 10px; border-radius: 8px; border: 1px solid #2e3342;
+  background: var(--bg); color: var(--text); font-size: 14px;
+}
+#layer-list { overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+#layer-list .layer-cur { color: var(--accent); background: var(--accent-soft); }
 #comments-row {
   display: flex; gap: 12px; align-items: flex-start; cursor: pointer;
   background: var(--panel-2); border-radius: 12px; padding: 12px 14px; margin: 0 0 12px;

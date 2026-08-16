@@ -627,8 +627,39 @@ function initChat() {
   });
   initPush();
   initMenu();
+  // layer picker popover: type-ahead over commenters
+  $('#layer-pick').onclick = () => {
+    const pop = $('#layer-pop');
+    pop.classList.toggle('hidden');
+    if (!pop.classList.contains('hidden')) {
+      $('#layer-search').value = '';
+      renderLayerList();
+      if (!$('#layer-search').classList.contains('hidden')) $('#layer-search').focus();
+    }
+  };
+  $('#layer-search').oninput = renderLayerList;
+  document.addEventListener('pointerdown', e => {
+    const pop = $('#layer-pop');
+    if (!pop.contains(e.target) && !$('#layer-pick').contains(e.target)) pop.classList.add('hidden');
+  });
   initTimeline();
   restorePendingUploads();
+  // layer picker popover: type-ahead over commenters
+  $('#layer-pick').onclick = () => {
+    const pop = $('#layer-pop');
+    pop.classList.toggle('hidden');
+    if (!pop.classList.contains('hidden')) {
+      $('#layer-search').value = '';
+      renderLayerList();
+      if (!$('#layer-search').classList.contains('hidden')) $('#layer-search').focus();
+    }
+  };
+  $('#layer-search').oninput = renderLayerList;
+  document.addEventListener('pointerdown', e => {
+    const pop = $('#layer-pop');
+    if (!pop.contains(e.target) && !$('#layer-pick').contains(e.target)) pop.classList.add('hidden');
+  });
+
   // double-click means "play from here", not "select this word" — but plain
   // click-and-drag selection (copying transcript text) still works
   $('#messages').addEventListener('mousedown', e => {
@@ -950,7 +981,7 @@ async function poll() {
     state.invites = data.invites || [];
     state.requests = data.requests || [];
     if (data.myRole !== undefined) setRole(data.myRole);
-    updateLayerSel();
+    updateLayerPick();
     render();
     refreshTimelinePanel();
     if (!$('#share-gate').classList.contains('hidden')) renderShare();
@@ -1625,48 +1656,61 @@ function remapPlayback() {
 }
 
 // ---------- comment layers ----------
-// The dropdown picks whose comments you're viewing; recordings route into
-// whatever's selected. Editors get every layer; everyone else just their own.
-let lastLayerSelKey = '';
-function updateLayerSel() {
-  const sel = $('#layer-sel');
+// The picker chooses whose comments you're viewing; recordings route into
+// whatever's selected. It only exists once there ARE comment layers to see
+// (editors: everyone's; others: their own), and the list is type-ahead
+// searchable so a pile of commenters stays navigable.
+let layerEntries = [];
+
+function updateLayerPick() {
+  const btn = $('#layer-pick');
   const me = state.auth?.user;
-  const commentsOn = !!state.chatMeta?.comments;
-  const layered = state.messages.some(mm => mm.layer);
-  const show = !!state.auth?.authEnabled && (commentsOn || layered) && (me || canEdit());
-  sel.classList.toggle('hidden', !show);
+  const layers = new Map(); // id -> { label, n }
+  for (const mm of state.messages) {
+    if (!mm.layer) continue;
+    const e = layers.get(mm.layer) || { label: null, n: 0 };
+    e.n++;
+    if (!e.label && mm.userId === mm.layer) e.label = mm.author; // the layer owner's own clip names it
+    layers.set(mm.layer, e);
+  }
+  layerEntries = [{ id: '', label: 'Conversation', n: null }];
+  for (const [id, e] of layers) {
+    const label = id === me?.id ? 'My comments'
+      : e.label || state.messages.find(mm => mm.layer === id)?.author || 'Commenter';
+    layerEntries.push({ id, label, n: e.n });
+  }
+  const show = layerEntries.length > 1;
+  btn.classList.toggle('hidden', !show);
   if (!show) {
+    $('#layer-pop').classList.add('hidden');
     if (state.layer) { state.layer = ''; refreshFilter(); }
     return;
   }
-  const opts = [['', 'Conversation']];
-  if (canEdit()) {
-    const layers = new Map();
-    for (const mm of state.messages) {
-      if (!mm.layer || layers.has(mm.layer)) continue;
-      // label a layer by its owner: the commenter's own message names it
-      const owner = state.messages.find(o => o.layer === mm.layer && o.userId === mm.layer);
-      layers.set(mm.layer, mm.layer === me?.id ? 'My comments' : `${(owner || mm).author} · comments`);
-    }
-    if (me && commentsOn && !layers.has(me.id)) layers.set(me.id, 'My comments');
-    for (const [id, label] of layers) opts.push([id, label]);
-  } else if (me && (commentsOn || state.messages.some(mm => mm.layer === me.id))) {
-    opts.push([me.id, 'My comments']);
+  if (!layerEntries.some(e => e.id === state.layer)) { state.layer = ''; refreshFilter(); }
+  const cur = layerEntries.find(e => e.id === state.layer);
+  btn.textContent = state.layer ? `💬 ${cur.label}` : 'Conversation';
+  if (!$('#layer-pop').classList.contains('hidden')) renderLayerList();
+}
+
+function renderLayerList() {
+  const list = $('#layer-list');
+  const q = ($('#layer-search').value || '').trim().toLowerCase();
+  list.innerHTML = '';
+  for (const e of layerEntries) {
+    if (q && !e.label.toLowerCase().includes(q)) continue;
+    const row = document.createElement('button');
+    row.className = 'menu-row' + (e.id === state.layer ? ' layer-cur' : '');
+    row.textContent = e.n != null ? `${e.label} · ${e.n} clip${e.n === 1 ? '' : 's'}` : e.label;
+    row.onclick = () => {
+      state.layer = e.id;
+      $('#layer-pop').classList.add('hidden');
+      refreshFilter();
+      updateLayerPick();
+    };
+    list.appendChild(row);
   }
-  const key = JSON.stringify(opts);
-  if (key !== lastLayerSelKey) {
-    lastLayerSelKey = key;
-    sel.innerHTML = '';
-    for (const [v, label] of opts) {
-      sel.appendChild(Object.assign(document.createElement('option'), { value: v, textContent: label }));
-    }
-  }
-  if (![...sel.options].some(o => o.value === state.layer)) state.layer = '';
-  sel.value = state.layer;
-  sel.onchange = () => {
-    state.layer = sel.value;
-    refreshFilter();
-  };
+  // search only earns its space once there's a crowd
+  $('#layer-search').classList.toggle('hidden', layerEntries.length <= 7);
 }
 
 // view lens changed (time window, depth, layer, or a fold chip) — rebuild everything
@@ -1692,9 +1736,8 @@ async function toggleRecord() {
       // the recording lands where they're looking
       if (state.layer !== me.id) {
         state.layer = me.id;
-        const sel = $('#layer-sel');
-        if (sel && [...sel.options].some(o => o.value === me.id)) sel.value = me.id;
         refreshFilter();
+        updateLayerPick();
         showToast('Recording into your comments — only you and the editors see them');
       }
     } else if (state.chatMeta?.comments && !me) {
@@ -2896,7 +2939,7 @@ function renderShare() {
       showToast(comments
         ? 'Comments on — share the link and anyone who can watch can leave them'
         : 'Comments off — existing ones stay visible to you');
-      updateLayerSel();
+      updateLayerPick();
       setRole(state.myRole); // record button visibility can change for viewers
     } else {
       ct.checked = !comments;
