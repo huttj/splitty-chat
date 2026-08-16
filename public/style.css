@@ -522,3 +522,16 @@ body.role-viewer #splitter { bottom: 0; }
 
 /* screen toggle sits left of record; stop stays stacked above */
 #rec-row { display: flex; align-items: center; gap: 10px; }
+
+/* side-by-side screen playback: screen left, camera right, both whole */
+#split-btn {
+  position: absolute; top: 8px; left: 56px; z-index: 4;
+  background: rgba(0, 0, 0, 0.5); border: 0; color: #fff; cursor: pointer;
+  border-radius: 8px; padding: 4px 9px; font-size: 11px; font-weight: 650;
+  backdrop-filter: blur(4px); opacity: 0.75;
+}
+#split-btn:hover { opacity: 1; }
+#video-box.screen-split #screen-player { inset: 0 50% 0 0; width: 50%; object-fit: contain; }
+#video-box.screen-split video:not(#screen-player):not(#preview):not(.hidden) {
+  inset: 0 0 0 50%; width: 50%; object-fit: contain; background: #000;
+}

@@ -32,7 +32,9 @@ const state = {
   friends: null,     // lazy-loaded for the share panel
   inviteToken: null, // ?invite= view-only credential for private chats
   roleInit: false,   // first-poll gate/camera decision made
-  screenSwap: false, // screen-share playback: false = screen big, true = camera big
+  // screen-share playback layout: 'screen' (screen big, cam floats),
+  // 'cam' (swapped), or 'split' (side by side in the main box)
+  screenLayout: localStorage.getItem('splitty:screenlayout') || 'screen',
 };
 
 let lastPipSwap = 0; // suppress the click that trails a PiP swap tap
@@ -580,7 +582,6 @@ function initChat() {
     }
     if (!conf) return;
     e.preventDefault();
-    const boxRect = box.getBoundingClientRect();
     const rect = el.getBoundingClientRect();
     const grab = { x: e.clientX, y: e.clientY };
     const nearL = grab.x - rect.left < 20, nearR = rect.right - grab.x < 20;
@@ -590,11 +591,8 @@ function initChat() {
     const anchor = { x: nearL ? rect.right : rect.left, y: nearT ? rect.bottom : rect.top }; // opposite corner stays put
     let moved = false;
     const apply = (x, y, w) => {
-      conf.geom = {
-        xr: (x - boxRect.left) / boxRect.width,
-        yr: (y - boxRect.top) / boxRect.height,
-        wr: w / boxRect.width,
-      };
+      // viewport ratios — pips live anywhere in the window, not just the box
+      conf.geom = { xr: x / window.innerWidth, yr: y / window.innerHeight, wr: w / window.innerWidth };
       localStorage.setItem(conf.key, JSON.stringify(conf.geom));
       layoutPip(el, conf);
     };
@@ -603,7 +601,7 @@ function initChat() {
       if (!moved) return;
       if (resizing) {
         if (conf.mini) { conf.mini = false; localStorage.setItem('splitty:pipmini', ''); }
-        const w = Math.min(Math.max(Math.abs(ev.clientX - anchor.x), 80), boxRect.width * 0.7);
+        const w = Math.min(Math.max(Math.abs(ev.clientX - anchor.x), 80), window.innerWidth * 0.8);
         const h = w / ar;
         apply(nearL ? anchor.x - w : anchor.x, nearT ? anchor.y - h : anchor.y, w);
       } else {
@@ -746,6 +744,7 @@ function initChat() {
   for (const el of [...players, screenEl(), preview]) {
     el.addEventListener('resize', relayoutPips);         // intrinsic size changed (e.g. shared window resized mid-clip)
     el.addEventListener('loadedmetadata', relayoutPips); // aspect known — snap the pip box to it
+    el.addEventListener('pointermove', pipHoverCursor);  // diagonal cursors over the corners
   }
 
   // fill (crop to fit) vs fit (letterbox, whole frame visible)
@@ -1813,9 +1812,8 @@ const pips = {
     defW: 0.24, defRight: false,
     mini: false,
     onTap() { // tap swaps which video is big
-      state.screenSwap = !state.screenSwap;
+      setScreenLayout(state.screenLayout === 'cam' ? 'screen' : 'cam');
       lastPipSwap = performance.now();
-      updateStage();
     },
   },
 };
@@ -1825,24 +1823,50 @@ for (const c of Object.values(pips)) {
 
 const pipAspect = el => (el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : 4 / 3);
 
+// pips are position:fixed so they can live anywhere in the window (the video
+// box's overflow:hidden doesn't clip fixed descendants); geometry is stored
+// as viewport ratios so it survives window resizes
 function layoutPip(el, conf) {
-  const box = $('#video-box');
-  const bw = box.clientWidth, bh = box.clientHeight;
-  if (!bw || !bh) return;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const box = $('#video-box').getBoundingClientRect();
   const ar = pipAspect(el);
-  let w = conf.mini ? bw * 0.12 : (conf.geom ? conf.geom.wr * bw : conf.defW * bw);
-  w = Math.min(Math.max(w, 80), bw * 0.7);
+  let w = conf.mini ? 110 : (conf.geom ? conf.geom.wr * vw : conf.defW * Math.max(box.width, 320));
+  w = Math.min(Math.max(w, 80), vw * 0.8);
   let h = w / ar;
-  if (h > bh * 0.8) { h = bh * 0.8; w = h * ar; }
-  let x = conf.geom ? conf.geom.xr * bw : conf.defRight ? bw - w - 8 : 12;
-  let y = conf.geom ? conf.geom.yr * bh : 8;
-  x = Math.min(Math.max(x, 4), Math.max(bw - w - 4, 4));
-  y = Math.min(Math.max(y, 4), Math.max(bh - h - 4, 4));
-  Object.assign(el.style, { inset: 'auto', left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+  if (h > vh * 0.8) { h = vh * 0.8; w = h * ar; }
+  // default perch: over the video box, corners apart so the two never stack
+  let x = conf.geom ? conf.geom.xr * vw : conf.defRight ? box.right - w - 8 : box.left + 12;
+  let y = conf.geom ? conf.geom.yr * vh : Math.max(box.top + 8, 4);
+  x = Math.min(Math.max(x, 4), Math.max(vw - w - 4, 4));
+  y = Math.min(Math.max(y, 4), Math.max(vh - h - 4, 4));
+  Object.assign(el.style, {
+    position: 'fixed', inset: 'auto', zIndex: 70, // above the page, below modals/toasts
+    left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px`,
+  });
 }
 
 function clearPip(el) {
-  for (const p of ['inset', 'left', 'top', 'width', 'height']) el.style.removeProperty(p);
+  for (const p of ['position', 'inset', 'left', 'top', 'width', 'height', 'z-index', 'cursor']) {
+    el.style.removeProperty(p);
+  }
+}
+
+// is this element currently one of the floating videos?
+function isPipNow(el) {
+  const box = $('#video-box');
+  if (el === preview) return box.classList.contains('mode-play') || box.classList.contains('mode-screenlive');
+  return el.classList.contains('spip');
+}
+
+// diagonal resize cursors over the corners, grab elsewhere
+function pipHoverCursor(e) {
+  const el = e.currentTarget;
+  if (!isPipNow(el)) { el.style.removeProperty('cursor'); return; }
+  const r = el.getBoundingClientRect();
+  const L = e.clientX - r.left < 20, R = r.right - e.clientX < 20;
+  const T = e.clientY - r.top < 20, B = r.bottom - e.clientY < 20;
+  el.style.cursor = (L && T) || (R && B) ? 'nwse-resize'
+    : (R && T) || (L && B) ? 'nesw-resize' : 'grab';
 }
 
 function relayoutPips() {
@@ -1852,6 +1876,12 @@ function relayoutPips() {
   }
   const spipEl = [...players, screenEl()].find(p => p.classList.contains('spip'));
   if (spipEl) layoutPip(spipEl, pips.spip);
+}
+
+function setScreenLayout(layout) {
+  state.screenLayout = layout;
+  localStorage.setItem('splitty:screenlayout', layout);
+  updateStage();
 }
 
 // ---------- stage (video area) ----------
@@ -1897,10 +1927,16 @@ function updateStage() {
   box.classList.toggle('mode-screen', screenPlay);
   box.classList.toggle('mode-screenlive', screenLive);
   sp.classList.toggle('hidden', !(screenPlay || screenLive));
-  // which video is the little draggable one (tap it to swap)
+  const split = screenPlay && state.screenLayout === 'split';
+  box.classList.toggle('screen-split', split);
+  const splitBtn = $('#split-btn');
+  splitBtn.classList.toggle('hidden', !screenPlay);
+  splitBtn.textContent = split ? 'PiP' : 'Split'; // button shows the alternative
+  splitBtn.onclick = () => setScreenLayout(split ? 'screen' : 'split');
+  // which video is the little draggable one (tap it to swap) — none when split
   players.forEach(p => p.classList.remove('spip'));
   sp.classList.remove('spip');
-  if (screenPlay) (state.screenSwap ? sp : activeEl()).classList.add('spip');
+  if (screenPlay && !split) (state.screenLayout === 'cam' ? sp : activeEl()).classList.add('spip');
 
   // floating-video geometry: sized to each video's real aspect, user-placed
   if (mode === 'play' || screenLive) layoutPip(preview, pips.cam);
