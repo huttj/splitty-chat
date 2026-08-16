@@ -56,9 +56,11 @@ const ROLE_RANK = { viewer: 1, commenter: 2, editor: 3 };
 const canComment = () =>
   !state.auth?.authEnabled || (ROLE_RANK[state.myRole] || 0) >= ROLE_RANK.commenter;
 const canEdit = () => !!state.auth?.authEnabled && state.myRole === 'editor';
-// ...and can they record at all, counting comment layers?
+// ...and can they record at all, counting comment layers? Signed-out
+// visitors on a comment-enabled chat count too: they see the record button
+// and get the camera prompt — tapping record is what asks them to sign in.
 const canRecordHere = () =>
-  canComment() || !!(state.chatMeta?.comments && state.auth?.user && state.myRole);
+  canComment() || !!(state.chatMeta?.comments && state.myRole);
 
 // name comparison is forgiving about case/whitespace so "Josh " on your phone
 // still owns what "josh" recorded on your laptop
@@ -992,9 +994,11 @@ function setRole(role) {
     if (!state.auth?.authEnabled) return;
     if (state.roleInit) return;
     state.roleInit = true;
-    // first sight of the chat: only people who can record need a name + camera
-    if (canComment()) {
-      if (!state.name && !state.auth.user) state.openNameGate?.();
+    // first sight of the chat: anyone who could record here warms the camera
+    // (including signed-out visitors on comment-enabled chats — recording is
+    // what asks them to sign in)
+    if (canRecordHere()) {
+      if (canComment() && !state.name && !state.auth.user) state.openNameGate?.();
       else ensureCam().catch(armCamRetry);
     }
   }
@@ -1618,7 +1622,7 @@ function updateLayerSel() {
   const me = state.auth?.user;
   const commentsOn = !!state.chatMeta?.comments;
   const layered = state.messages.some(mm => mm.layer);
-  const show = !!state.auth?.authEnabled && (commentsOn || layered);
+  const show = !!state.auth?.authEnabled && (commentsOn || layered) && (me || canEdit());
   sel.classList.toggle('hidden', !show);
   if (!show) {
     if (state.layer) { state.layer = ''; refreshFilter(); }
@@ -1682,6 +1686,11 @@ async function toggleRecord() {
         refreshFilter();
         showToast('Recording into your comments — only you and the editors see them');
       }
+    } else if (state.chatMeta?.comments && !me) {
+      // the moment of intent: they tried to comment — now ask them to sign in
+      wireAuthBox(location.pathname);
+      $('#name-gate').classList.remove('hidden');
+      return;
     } else {
       return showToast("You're watching this chat — ask an editor for record access");
     }
