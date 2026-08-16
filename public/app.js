@@ -421,9 +421,16 @@ function initMenu() {
   } else {
     $('#menu-devices').classList.add('hidden');
   }
-  // post an existing video file as a message
+  // post an existing video file as a message — spliced at the playhead when
+  // something's playing, exactly like recording (frozen at the moment of intent)
   $('#upload-btn').onclick = () => {
     if (!canRecordHere()) return showToast("You don't have permission to post here");
+    state._uploadAnchor = state.playing && state.playIdx >= 0
+      ? {
+          parentId: state.playlist[state.playIdx].id,
+          anchorMs: Math.floor(activeEl().currentTime * 1000),
+        }
+      : null;
     $('#upload-input').click();
   };
   $('#upload-input').onchange = () => {
@@ -732,6 +739,31 @@ function initChat() {
   document.addEventListener('pointerdown', e => {
     const pop = $('#layer-pop');
     if (!pop.contains(e.target) && !$('#layer-pick').contains(e.target)) pop.classList.add('hidden');
+  });
+
+  // drop a video file anywhere on the transcript to post it (splices at the
+  // playhead when something's playing, same as the upload button)
+  const msgsEl = $('#messages');
+  for (const ev of ['dragover', 'dragenter']) {
+    msgsEl.addEventListener(ev, e => {
+      if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
+      e.preventDefault();
+      msgsEl.classList.add('drop-hot');
+    });
+  }
+  msgsEl.addEventListener('dragleave', e => {
+    if (!msgsEl.contains(e.relatedTarget)) msgsEl.classList.remove('drop-hot');
+  });
+  msgsEl.addEventListener('drop', e => {
+    e.preventDefault();
+    msgsEl.classList.remove('drop-hot');
+    const f = [...e.dataTransfer.files].find(ff => ff.type.startsWith('video/'));
+    if (!f) return showToast('Drop a video file');
+    if (!canRecordHere()) return showToast("You don't have permission to post here");
+    state._uploadAnchor = state.playing && state.playIdx >= 0
+      ? { parentId: state.playlist[state.playIdx].id, anchorMs: Math.floor(activeEl().currentTime * 1000) }
+      : null;
+    uploadVideoFile(f);
   });
 
   // dragging across the transcript scrubs the playhead — words are a seek
@@ -2271,14 +2303,16 @@ async function uploadVideoFile(file) {
   }
 
   const recLayer = canEdit() ? state.layer : canComment() ? '' : (state.auth?.user?.id || '');
+  const anchor = state._uploadAnchor || {};
+  state._uploadAnchor = null;
   enqueueUpload({
     videoBlob: file,
     audioBlob,
     screenBlob: null,
     durationMs,
-    rec: { parentId: null, anchorMs: null, resume: null, layer: recLayer },
+    rec: { parentId: anchor.parentId || null, anchorMs: anchor.anchorMs ?? null, resume: null, layer: recLayer },
   });
-  showToast('Uploading — it appears in the chat when it lands');
+  showToast(anchor.parentId ? 'Uploading — it splices in right where you were' : 'Uploading — it appears in the chat when it lands');
 }
 
 // ---------- unsent-clip persistence ----------
@@ -2650,7 +2684,11 @@ function render() {
   box.innerHTML = '';
 
   if (!state.messages.length && !pending.length) {
-    box.innerHTML = '<div class="empty">Nothing here yet.<br>Record the first video note.</div>';
+    box.innerHTML = '<div class="empty">Nothing here yet.<br>Record the first video note.'
+      + (canRecordHere() ? '<br><button id="empty-upload" class="btn-outline">…or click to upload / drop a video here</button>' : '')
+      + '</div>';
+    const b = box.querySelector('#empty-upload');
+    if (b) b.onclick = () => $('#upload-btn').click(); // same gate + picker as the menu
     return;
   }
 

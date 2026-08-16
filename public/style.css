@@ -700,3 +700,6 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 /* share panel action buttons stack full-width with breathing room */
 #share-ask, #share-fork { width: 100%; margin-top: 10px; }
 #share-fork-note { margin-top: 6px; }
+
+/* video-file drop target */
+#messages.drop-hot { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
