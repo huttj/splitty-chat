@@ -889,7 +889,11 @@ async function uploadGate(request, env, chatId) {
   if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
   if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
   const access = await chatAccess(env, user, chat);
-  if (!roleAtLeast(access.role, 'commenter')) return json({ error: 'no permission to record here', code: 'role' }, 403);
+  // commenter+ posts to the base; with comments on, any viewer uploads too
+  // (their message can only land in their own layer)
+  if (!roleAtLeast(access.role, 'commenter') && !(chat.comments && access.role)) {
+    return json({ error: 'no permission to record here', code: 'role' }, 403);
+  }
   return null;
 }
 
@@ -938,10 +942,30 @@ async function createMessage(request, env, ctx, chatId) {
       return json({ error: "you can watch this chat, but you don't have permission to record in it", code: 'role' }, 403);
     }
     if (user.status === 'pending') {
-      const { n } = await env.DB.prepare('SELECT COUNT(*) AS n FROM messages WHERE user_id = ?')
-        .bind(user.id).first();
-      if (n >= 1) {
-        return json({ error: 'you can send one message until an admin approves you — hang tight', code: 'pending' }, 403);
+      if (layer) {
+        // signing in is enough to comment — unapproved accounts just get a
+        // per-chat time budget: 10 min, +2 min for each reply the
+        // conversation leaves in this layer. Blocking still cuts them off.
+        const { used } = await env.DB.prepare(
+          'SELECT COALESCE(SUM(duration_ms), 0) AS used FROM messages WHERE chat_id = ? AND layer_user_id = ? AND user_id = ?'
+        ).bind(chat.id, layer, user.id).first();
+        const { replies } = await env.DB.prepare(
+          'SELECT COUNT(*) AS replies FROM messages WHERE chat_id = ? AND layer_user_id = ? AND user_id != ?'
+        ).bind(chat.id, layer, user.id).first();
+        const budgetMin = 10 + 2 * replies;
+        if (used + (Number(form.get('durationMs')) || 0) > budgetMin * 60 * 1000) {
+          return json({
+            error: `you've used your ${budgetMin} minutes of comments here — replies from the conversation unlock more`,
+            code: 'budget',
+          }, 403);
+        }
+      } else {
+        // base conversation keeps the strict rule: one message until approved
+        const { n } = await env.DB.prepare('SELECT COUNT(*) AS n FROM messages WHERE user_id = ?')
+          .bind(user.id).first();
+        if (n >= 1) {
+          return json({ error: 'you can send one message until an admin approves you — hang tight', code: 'pending' }, 403);
+        }
       }
     }
   } else {

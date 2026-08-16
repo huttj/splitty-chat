@@ -1824,6 +1824,7 @@ async function runUploads() {
       if (err.code === 'pending') showToast('Sent limit reached — an admin needs to approve you before you can send more.');
       else if (err.code === 'blocked') showToast('Your account is blocked from sending.');
       else if (err.code === 'role') showToast("You don't have permission to record in this chat.");
+      else if (err.code === 'budget') showToast(err.message);
       else if (err.code === 'auth') { showToast('Sign in to send messages.'); $('#name-gate').classList.remove('hidden'); }
       else showToast('Upload failed — the clip is saved here until it sends.', 'Retry', () => enqueueUpload(job));
     }
