@@ -1234,15 +1234,16 @@ function snapAnchor(msg, tSec) {
 }
 
 // silence windows between word timestamps, padded generously: Whisper marks
-// word ends early, so keep 0.3s after a word (finish the tail) and 0.15s
-// before the next; only clip pauses long enough to be worth it (>=0.7s)
+// word ends early (and starts a touch late), so keep 0.45s after a word
+// (finish the tail) and 0.25s before the next; only clip pauses clearly
+// worth it (>=1.0s)
 function silencesFor(msg) {
   if (!msg.words.length) return [];
   const sil = [];
   let prev = 0;
   const consider = (from, to) => {
-    const s = from + 0.3, e = to - 0.15;
-    if (to - from >= 0.7 && e - s >= 0.25) sil.push([s, e]);
+    const s = from + 0.45, e = to - 0.25;
+    if (to - from >= 1.0 && e - s >= 0.25) sil.push([s, e]);
   };
   for (const w of msg.words) {
     consider(prev, w.s);
