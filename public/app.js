@@ -1503,6 +1503,13 @@ function seekVirtual(vt, autoplay = true) {
   vt = Math.min(Math.max(vt, 0), Math.max(state.vDur - 0.05, 0));
   const idx = segIdxAt(vt);
   const seg = state.playlist[idx];
+  // a wild scrub leaves stale machinery behind (parked keys, a muted standby
+  // still running from an overlap launch) — reset it all before landing
+  for (const p of players) {
+    p._launched = false;
+    p._preparedKey = null;
+  }
+  standbyEl().pause();
   playSegment(idx, seg.start + (vt - seg.vStart), autoplay);
 }
 
@@ -1609,6 +1616,11 @@ function tickHighlight() {
   const seg = state.playlist[state.playIdx];
   if (!seg) return;
   if (!el.paused) {
+    // sanity: only enforce boundaries when the active element is actually
+    // showing this segment's file — a scrub can briefly leave them mismatched,
+    // and advancing on the wrong clock ping-pongs segments (the "twitch")
+    const segMsg = state.byId.get(seg.id);
+    if (segMsg && el.src !== mediaUrl(segMsg)) return;
     // content-time on both sides: active and standby play at the same rate,
     // so speed cancels out — never scale these thresholds by playbackRate
     const remain = seg.end - el.currentTime;
@@ -1649,6 +1661,13 @@ function previewVirtual(vt) {
   state.playLabel = msg.author;
   $('#pip-label').textContent = msg.author;
   el.pause();
+  // a standby launched muted for an overlap must not keep running under a scrub
+  const stb = standbyEl();
+  if (stb._launched) {
+    stb.pause();
+    stb._launched = false;
+    stb._preparedKey = null;
+  }
   if (el.src !== src) {
     el._pendingSeek = at;
     el._autoplay = false;
@@ -1684,6 +1703,8 @@ function onTimeUpdate() {
   if (state.scrubbing) return; // paused preview seeks — don't advance or mark seen
   const seg = state.playlist[state.playIdx];
   const t = activeEl().currentTime;
+  const segMsg = state.byId.get(seg.id);
+  if (segMsg && activeEl().src !== mediaUrl(segMsg)) return; // mismatched after a scrub — don't advance on the wrong clock
 
   // fallback boundary check (frame ticker cuts tighter); file ends advance via 'ended'
   if (t >= seg.end - 0.05 && !isTailSeg(seg)) return advanceSegment(state.playIdx);
@@ -3049,9 +3070,9 @@ function renderShare() {
     }
   };
 
-  // fork: anyone signed in with access can spin this conversation (plus
+  // fork: approved accounts with access can spin this conversation (plus
   // their own comments, woven in) into a chat they own
-  const canFork = !!state.auth?.user && !!state.chatMeta?.ownerId;
+  const canFork = state.auth?.user?.status === 'approved' && !!state.chatMeta?.ownerId;
   $('#share-fork').classList.toggle('hidden', !canFork);
   $('#share-fork-note').classList.toggle('hidden', !canFork);
   $('#share-fork').onclick = async () => {

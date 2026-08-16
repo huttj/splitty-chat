@@ -610,6 +610,10 @@ export default {
         const user = await getUser(request, env);
         if (!user) return json({ error: 'sign in first', code: 'auth' }, 401);
         if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
+        // forking spins up a whole owned chat — approved accounts only
+        if (user.status !== 'approved' && !isAdmin(env, user)) {
+          return json({ error: 'forking is for approved accounts — an admin can approve you', code: 'pending' }, 403);
+        }
         const access = await chatAccess(env, user, chat);
         if (!access.role) return json({ error: 'no access to this chat' }, 403);
         const { results } = await env.DB.prepare(
