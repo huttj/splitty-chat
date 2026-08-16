@@ -43,6 +43,9 @@ const state = {
   layer: '',
   // visual lag for the spoken-word glow (Whisper stamps run early) — tunable
   wordLag: (v => Number.isFinite(v) ? v : 0.3)(parseFloat(localStorage.getItem('splitty:wordlag'))),
+  // shoulder kept around words when clipping silences (before-word margin is
+  // half of this) — tunable
+  silPad: (v => Number.isFinite(v) ? v : 0.75)(parseFloat(localStorage.getItem('splitty:silpad'))),
 };
 
 // Editors flip through comment layers with the picker; everyone else just
@@ -428,6 +431,22 @@ function initMenu() {
     state.wordLag = +lag.value;
     localStorage.setItem('splitty:wordlag', String(state.wordLag));
     paintLag();
+  };
+
+  // silence-trim shoulder: how much breathing room stays around words when
+  // Skip pauses clips dead air (before-word margin is half of this)
+  const pad = $('#pad-range'), padLabel = $('#pad-label');
+  const paintPad = () => (padLabel.textContent = `${Math.round(state.silPad * 1000)}ms`);
+  pad.value = state.silPad;
+  paintPad();
+  let padTimer = null;
+  pad.oninput = () => {
+    state.silPad = +pad.value;
+    localStorage.setItem('splitty:silpad', String(state.silPad));
+    paintPad();
+    // splice points move — rebuild playlist/transcript, debounced for drags
+    clearTimeout(padTimer);
+    padTimer = setTimeout(() => { if (state.hideGaps) refreshFilter(); }, 150);
   };
 }
 
@@ -1255,7 +1274,7 @@ function silencesFor(msg) {
   const sil = [];
   let prev = 0;
   const consider = (from, to) => {
-    const s = from + 0.6, e = to - 0.3;
+    const s = from + state.silPad, e = to - state.silPad / 2;
     if (to - from >= 1.0 && e - s >= 0.25) sil.push([s, e]);
   };
   for (const w of msg.words) {
