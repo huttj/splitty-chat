@@ -414,8 +414,8 @@ export default {
 
       if ((m = pathname.match(/^\/api\/admin\/chats\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
         const { results } = await env.DB
-          .prepare('SELECT video_key, screen_key FROM messages WHERE chat_id = ?').bind(m[1]).all();
-        const keys = results.flatMap(r => [r.video_key, r.screen_key]).filter(Boolean);
+          .prepare('SELECT video_key, screen_key, audio_key FROM messages WHERE chat_id = ?').bind(m[1]).all();
+        const keys = results.flatMap(r => [r.video_key, r.screen_key, r.audio_key]).filter(Boolean);
         for (let i = 0; i < keys.length; i += 1000) {
           await env.MEDIA.delete(keys.slice(i, i + 1000));
         }
@@ -732,12 +732,39 @@ export default {
         return json({ ok: true, anchorMs });
       }
 
+      // re-run transcription (optionally pinning a language) — author or editor
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)\/transcribe$/)) && request.method === 'POST') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const row = await env.DB
+          .prepare('SELECT author, user_id, audio_key, video_key FROM messages WHERE id = ? AND chat_id = ?')
+          .bind(m[2], m[1]).first();
+        if (!row) return json({ error: 'not found' }, 404);
+        const body = await request.json();
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        const allowed = authEnabled(env)
+          ? access.role === 'editor' || (roleAtLeast(access.role, 'commenter') && ownsMessage(user, row, body.author))
+          : ownsMessage(user, row, body.author);
+        if (!allowed) return json({ error: 'only the author or an editor can retranscribe this' }, 403);
+        const obj = await env.MEDIA.get(row.audio_key || row.video_key);
+        if (!obj) return json({ error: 'media missing' }, 404);
+        if (obj.size > 24 * 1024 * 1024) {
+          // older message without a stored voice track — the full video won't fit in Worker memory
+          return json({ error: "this clip predates stored audio tracks and its video is too big to retranscribe" }, 400);
+        }
+        await env.DB.prepare("UPDATE messages SET transcript_status = 'pending' WHERE id = ?").bind(m[2]).run();
+        const buf = await obj.arrayBuffer();
+        ctx.waitUntil(transcribe(env, m[2], buf, cleanLang(body.language)));
+        return json({ ok: true });
+      }
+
       // delete a message; its interjections fall onto its spot in the parent — author or editor
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)$/)) && request.method === 'DELETE') {
         const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
         if (!chat) return json({ error: 'not found' }, 404);
         const row = await env.DB
-          .prepare('SELECT author, user_id, parent_id, anchor_ms, video_key, screen_key FROM messages WHERE id = ? AND chat_id = ?')
+          .prepare('SELECT author, user_id, parent_id, anchor_ms, video_key, screen_key, audio_key FROM messages WHERE id = ? AND chat_id = ?')
           .bind(m[2], m[1]).first();
         if (!row) return json({ error: 'not found' }, 404);
         const body = await request.json();
@@ -754,7 +781,7 @@ export default {
           await env.DB.prepare('UPDATE messages SET parent_id = NULL, anchor_ms = NULL WHERE parent_id = ?')
             .bind(m[2]).run();
         }
-        await env.MEDIA.delete([row.video_key, row.screen_key].filter(Boolean));
+        await env.MEDIA.delete([row.video_key, row.screen_key, row.audio_key].filter(Boolean));
         await env.DB.prepare('DELETE FROM messages WHERE id = ?').bind(m[2]).run();
         return json({ ok: true });
       }
@@ -926,21 +953,28 @@ async function createMessage(request, env, ctx, chatId) {
     transcriptStatus: 'pending',
   };
 
+  // the ~64kbps voice track gets stored too — it's tiny and makes
+  // retranscription (e.g. with a language override) cheap forever
+  let audioKey = null, transcriptBuf = null;
+  if (audio instanceof File && audio.size > 0) {
+    transcriptBuf = await audio.arrayBuffer();
+    const amime = (audio.type || 'audio/webm').split(';')[0];
+    audioKey = `${slug(16)}.${amime.includes('mp4') ? 'm4a' : 'webm'}`;
+    await env.MEDIA.put(audioKey, transcriptBuf, { httpMetadata: { contentType: amime } });
+  } else if (video instanceof File) {
+    transcriptBuf = await video.arrayBuffer(); // legacy/dev inline path
+  }
+
   await env.DB.prepare(
-    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, duration_ms, gain, created_at, transcript_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
-  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, msg.durationMs, msg.gain, msg.createdAt).run();
+    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, audio_key, duration_ms, gain, created_at, transcript_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, audioKey, msg.durationMs, msg.gain, msg.createdAt).run();
 
   // transcribe after the response goes out; client polls for the result.
   // Push notifications wait for the transcript so they can quote the message.
-  // Chunk-uploaded messages always ship the small audio track; if it's somehow
-  // missing and there's no inline video, skip transcription rather than pull
-  // a huge file back out of R2 into Worker memory.
-  const transcriptSource = audio instanceof File && audio.size > 0 ? audio
-    : video instanceof File ? video : null;
-  if (transcriptSource) {
-    const buf = await transcriptSource.arrayBuffer();
-    ctx.waitUntil(transcribe(env, msg.id, buf).then(() => notifyNewMessage(env, msg)));
+  if (transcriptBuf) {
+    const lang = cleanLang(form.get('lang'));
+    ctx.waitUntil(transcribe(env, msg.id, transcriptBuf, lang).then(() => notifyNewMessage(env, msg)));
   } else {
     await env.DB.prepare("UPDATE messages SET transcript_status = 'failed' WHERE id = ?").bind(msg.id).run();
     ctx.waitUntil(notifyNewMessage(env, msg));
@@ -949,10 +983,15 @@ async function createMessage(request, env, ctx, chatId) {
   return json({ message: msg });
 }
 
-async function transcribe(env, messageId, audioBuf) {
+const cleanLang = s => (typeof s === 'string' && /^[a-z]{2,3}$/i.test(s.trim()) ? s.trim().toLowerCase() : '');
+
+async function transcribe(env, messageId, audioBuf, language = '') {
   let status = 'failed', text = '', words = [];
   try {
-    const out = await env.AI.run('@cf/openai/whisper-large-v3-turbo', { audio: toBase64(audioBuf) });
+    const out = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
+      audio: toBase64(audioBuf),
+      ...(language && { language }), // pin it when auto-detect guesses wrong
+    });
     text = (out.text || '').trim();
     const raw = out.words?.length
       ? out.words

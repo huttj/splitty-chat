@@ -376,6 +376,10 @@ function initDevicePicker() {
   });
   $('#cam-sel').onchange = applyDevicePick;
   $('#mic-sel').onchange = applyDevicePick;
+  // transcription language rides along in the same panel; applies to new
+  // clips and to the ↻ retranscribe button on message cards
+  $('#lang-sel').value = localStorage.getItem('splitty:lang') || '';
+  $('#lang-sel').onchange = () => localStorage.setItem('splitty:lang', $('#lang-sel').value);
 }
 
 // Safari only grants the camera from a real tap — retry on the first gesture,
@@ -1710,8 +1714,12 @@ const uploader = { jobs: [], running: false, progress: null };
 
 function enqueueUpload(job) {
   job.jid ||= Math.random().toString(36).slice(2);
+  job.done = false;
+  job.phase = null;
   savePending(job); // survives a refresh/crash — restorePendingUploads offers a resend
   uploader.jobs.push(job);
+  state.lastRenderKey = ''; // the placeholder card appears immediately
+  render();
   runUploads();
   updateHint();
 }
@@ -1726,11 +1734,14 @@ async function runUploads() {
       // your own message never shows as "new" to you
       state.seen[message.id] = 10 * 60 * 60 * 1000;
       localStorage.setItem(`splitty:seen:${state.chatId}`, JSON.stringify(state.seen));
+      job.done = true; // placeholder yields...
+      await poll();    // ...to the real message, in the same render pass
       uploader.jobs.shift();
       dropPending(job.jid);
-      poll(); // pull the new message in; remapPlayback keeps our place if watching
     } catch (err) {
       uploader.jobs.shift();
+      state.lastRenderKey = ''; // drop the placeholder card
+      render();
       if (err.code === 'pending') showToast('Sent limit reached — an admin needs to approve you before you can send more.');
       else if (err.code === 'blocked') showToast('Your account is blocked from sending.');
       else if (err.code === 'role') showToast("You don't have permission to record in this chat.");
@@ -1794,6 +1805,7 @@ async function chunkUpload(blob, onBytes) {
 
 async function uploadJob(job) {
   const { videoBlob, audioBlob, screenBlob, rec, durationMs } = job;
+  job.phase = 'sending';
   // finished keys are memoized on the job, so a Retry never redoes an upload
   const total = videoBlob.size + (screenBlob?.size || 0);
   let sent = (job.videoKey ? videoBlob.size : 0) + (job.screenKey ? screenBlob?.size || 0 : 0);
@@ -1815,10 +1827,13 @@ async function uploadJob(job) {
   }
   fd.append('author', state.name || 'anon');
   fd.append('durationMs', String(durationMs));
+  const lang = localStorage.getItem('splitty:lang');
+  if (lang) fd.append('lang', lang); // pin the transcription language
   if (rec.parentId) {
     fd.append('parentId', rec.parentId);
     fd.append('anchorMs', String(rec.anchorMs));
   }
+  job.phase = 'processing';
   return await jfetch(`/api/chats/${state.chatId}/messages`, { method: 'POST', body: fd });
 }
 
@@ -1886,6 +1901,7 @@ setInterval(() => {
     showToast('Hit the 10-minute limit — sending this clip');
   }
   updateHint();
+  updatePendingCards();
 }, 250);
 
 // only transient status (recording timer, upload state) — empty hides the pill.
@@ -2162,7 +2178,9 @@ function startAnchorDrag(e, msg) {
 // ---------- rendering ----------
 function render() {
   if (state.dragging) return; // don't rebuild the DOM out from under a drag
-  const key = JSON.stringify(state.messages.map(m => [m.id, m.transcriptStatus, m.words.length, m.anchorMs]));
+  const pending = uploader.jobs.filter(j => !j.done);
+  const key = JSON.stringify(state.messages.map(m => [m.id, m.transcriptStatus, m.words.length, m.anchorMs]))
+    + '|' + pending.map(j => j.jid).join(',');
   if (key === state.lastRenderKey) return;
   state.lastRenderKey = key;
 
@@ -2170,16 +2188,57 @@ function render() {
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 200;
   box.innerHTML = '';
 
-  if (!state.messages.length) {
+  if (!state.messages.length && !pending.length) {
     box.innerHTML = '<div class="empty">Nothing here yet.<br>Record the first video note.</div>';
     return;
   }
 
   for (const msg of roots()) box.appendChild(renderMessage(msg, 0));
+  // in-flight clips whose card didn't land inline (new roots, or the parent
+  // isn't on screen) sit at the bottom until the server hands back the real one
+  for (const job of pending) {
+    if (!box.querySelector(`.pending-msg[data-jid="${job.jid}"]`)) box.appendChild(pendingCard(job));
+  }
   if (nearBottom) box.scrollTop = box.scrollHeight;
 
   remapPlayback();
   prefetchUnheard();
+}
+
+// ghost card for a clip that's still uploading/processing
+function pendingCard(job) {
+  const card = document.createElement('div');
+  card.className = 'msg mine pending-msg';
+  card.dataset.jid = job.jid;
+  card.style.setProperty('--author-color', colorFor(state.name || 'anon'));
+  card.innerHTML = `
+    <div class="msg-head">
+      <span class="pending-spin"></span>
+      <span class="author"></span>
+      <span class="dur">${job.durationMs ? fmtClock(job.durationMs / 1000) : ''}</span>
+      <span class="spacer"></span>
+    </div>
+    <div class="msg-body"><span class="muted pending-status"></span></div>`;
+  const author = card.querySelector('.author');
+  author.textContent = state.name || 'anon';
+  author.style.color = colorFor(state.name || 'anon');
+  card.querySelector('.pending-status').textContent = pendingStatusText(job);
+  return card;
+}
+
+function pendingStatusText(job) {
+  if (job.phase === 'processing') return 'Processing…';
+  const active = uploader.jobs.find(j => !j.done);
+  if (job !== active) return 'Waiting to send…';
+  return uploader.progress != null ? `Sending… ${uploader.progress}%` : 'Sending…';
+}
+
+// keep the ghost cards' status lines live without rebuilding the transcript
+function updatePendingCards() {
+  for (const el of document.querySelectorAll('.pending-msg')) {
+    const job = uploader.jobs.find(j => j.jid === el.dataset.jid);
+    if (job) el.querySelector('.pending-status').textContent = pendingStatusText(job);
+  }
 }
 
 function renderMessage(msg, depth, unlocked = false) {
@@ -2202,6 +2261,7 @@ function renderMessage(msg, depth, unlocked = false) {
     ${isNew ? '<span class="badge">new</span>' : ''}
     <span class="spacer"></span>
     ${(mine || canEdit()) && depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}
+    ${(mine || canEdit()) && msg.transcriptStatus !== 'pending' ? '<button class="retr-btn" title="Transcribe again (uses your language setting)">↻</button>' : ''}
     ${mine || canEdit() ? '<button class="del-btn" title="Delete this message">✕</button>' : ''}`;
   const authorEl = head.querySelector('.author');
   authorEl.textContent = msg.author;
@@ -2209,6 +2269,23 @@ function renderMessage(msg, depth, unlocked = false) {
   head.querySelector('.play-btn').onclick = () => playFrom(msg.id, 0);
   const handle = head.querySelector('.drag-handle');
   if (handle) handle.addEventListener('pointerdown', e => startAnchorDrag(e, msg));
+  const retrBtn = head.querySelector('.retr-btn');
+  if (retrBtn) retrBtn.onclick = async () => {
+    retrBtn.disabled = true;
+    const res = await fetch(`/api/chats/${state.chatId}/messages/${msg.id}/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ author: state.name, language: localStorage.getItem('splitty:lang') || '' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      retrBtn.disabled = false;
+      return showToast(data.error || "Couldn't retranscribe that one");
+    }
+    showToast('Retranscribing…');
+    state.lastRenderKey = '';
+    poll();
+  };
   const delBtn = head.querySelector('.del-btn');
   if (delBtn) delBtn.onclick = async () => {
     if (!confirm('Delete this message for everyone? Replies to it will attach where it was.')) return;
@@ -2272,8 +2349,18 @@ function renderMessage(msg, depth, unlocked = false) {
     return frag;
   };
 
-  for (const kid of kids) {
-    body.appendChild(flushWordsUntil((kid.anchorMs || 0) / 1000));
+  // interleave real replies with in-flight ghosts at their anchors
+  const pendKids = uploader.jobs.filter(j => !j.done && j.rec?.parentId === msg.id);
+  const entries = [
+    ...kids.map(k => ({ t: (k.anchorMs || 0) / 1000, kid: k })),
+    ...pendKids.map(j => ({ t: (j.rec.anchorMs || 0) / 1000, job: j })),
+  ].sort((a, b) => a.t - b.t);
+  for (const { t, kid, job } of entries) {
+    body.appendChild(flushWordsUntil(t));
+    if (job) {
+      body.appendChild(pendingCard(job));
+      continue;
+    }
     if (kidVisible(kid, depth, unlocked)) {
       body.appendChild(renderMessage(kid, depth + 1, unlocked || state.filter.expanded.has(kid.id)));
     } else {

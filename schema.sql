@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS messages (
   words TEXT NOT NULL DEFAULT '[]',
   transcript_status TEXT NOT NULL DEFAULT 'pending',
   gain REAL DEFAULT 1,     -- client-measured loudness correction; added to live DB 2026-08-14 via ALTER
-  screen_key TEXT          -- companion screen-share video in R2; added to live DB 2026-08-15 via ALTER
+  screen_key TEXT,         -- companion screen-share video in R2; added to live DB 2026-08-15 via ALTER
+  audio_key TEXT           -- stored voice track (retranscription source); added to live DB 2026-08-15 via ALTER
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);
