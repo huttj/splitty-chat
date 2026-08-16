@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=85">
+  <link rel="stylesheet" href="/style.css?v=92">
 </head>
 <body>
 
@@ -165,18 +165,16 @@
 
     <footer id="controls">
       <div id="rec-hint"></div>
+      <button id="pause-btn" class="hidden" title="Play/pause">
+        <svg class="ic ic-play" viewBox="0 0 16 16"><path d="M4.5 2.2 13.5 8l-9 5.8z"/></svg>
+        <svg class="ic ic-pause" viewBox="0 0 16 16"><path d="M3.5 2.5h3.4v11H3.5zM9.1 2.5h3.4v11H9.1z"/></svg>
+      </button>
       <button id="stop-btn" class="hidden" title="Stop — next recording starts a new message">
         <span class="stop-square"></span>
       </button>
-      <div id="rec-row">
-        <button id="pause-btn" class="hidden" title="Play/pause">
-          <svg class="ic ic-play" viewBox="0 0 16 16"><path d="M4.5 2.2 13.5 8l-9 5.8z"/></svg>
-          <svg class="ic ic-pause" viewBox="0 0 16 16"><path d="M3.5 2.5h3.4v11H3.5zM9.1 2.5h3.4v11H9.1z"/></svg>
-        </button>
-        <button id="rec-btn" aria-label="record">
-          <span class="rec-dot"></span>
-        </button>
-      </div>
+      <button id="rec-btn" aria-label="record">
+        <span class="rec-dot"></span>
+      </button>
     </footer>
   </div>
 
@@ -316,6 +314,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=91"></script>
+  <script src="/app.js?v=92"></script>
 </body>
 </html>

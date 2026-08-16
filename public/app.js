@@ -1706,8 +1706,14 @@ function stopPlayback() {
 }
 
 function togglePause() {
-  if (!state.playing || state.rec) return; // never un-pause under a recording
+  if (state.rec) return; // never un-pause under a recording
   if (audioCtx?.state === 'suspended') audioCtx.resume(); // still in the tap's gesture
+  if (!state.playing) {
+    // transport is always visible now — play from the scrubber's position
+    if (!state.playlist.length) buildPlaylist();
+    if (state.playlist.length) seekVirtual(Number($('#scrubber').value) || 0, true);
+    return;
+  }
   const el = activeEl();
   el.paused ? el.play() : el.pause();
 }
@@ -1795,7 +1801,17 @@ function focusWordAt(seg, t, cls) {
     // view and reading stays put; it re-attaches once the highlight is back in
     // view — because you scrolled to it, or playback caught up to where you
     // are. Scrub focus always follows (you're actively steering there).
-    if (cls !== 'speaking' || highlightOnScreen(span)) span.scrollIntoView({ block: 'nearest' });
+    // Following re-centers before the glow reaches the bottom edge, so
+    // there's always upcoming text visible below it.
+    if (cls !== 'speaking') {
+      span.scrollIntoView({ block: 'nearest' });
+    } else if (highlightOnScreen(span)) {
+      const b = $('#messages').getBoundingClientRect();
+      const r = span.getBoundingClientRect();
+      if (r.bottom > b.top + b.height * 0.7 || r.top < b.top) {
+        span.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }
     lastFocus = { key, span };
   }
   span.style.setProperty('--f', `${(f * 100).toFixed(1)}%`);
@@ -2773,8 +2789,11 @@ function setScreenLayout(layout) {
 function updateStage() {
   const stage = $('#stage');
   const box = $('#video-box');
-  const mode = state.rec ? 'record' : state.playing ? 'play'
+  let mode = state.rec ? 'record' : state.playing ? 'play'
     : camStream ? 'self' : camError ? 'enable' : 'none';
+  // with content in the chat, the stage (and its transport) always shows —
+  // even for a camera-less viewer, so the player controls are ever-present
+  if (mode === 'none' && state.messages.length) mode = 'self';
   // record button telegraphs what it'll do: splice into the conversation vs new message
   $('#rec-btn').classList.toggle('splice', mode === 'play');
   $('#stop-btn').classList.toggle('hidden', mode !== 'play');
@@ -2849,7 +2868,7 @@ function updateStage() {
   $('#cam-off').classList.toggle('hidden', !(mode !== 'play' && !camStream && !screenLive));
   activeEl().classList.toggle('hidden', mode !== 'play');
   standbyEl().classList.add('hidden');
-  $('#transport').classList.toggle('hidden', mode !== 'play');
+  $('#transport').classList.toggle('hidden', mode !== 'play' && !state.messages.length);
   $('#pip-label').textContent =
     mode === 'record' ? '● you' : mode === 'play' ? state.playLabel : 'you';
 }

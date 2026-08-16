@@ -520,8 +520,6 @@ body.role-viewer #splitter { bottom: 0; }
 
 .screen-tag { font-size: 12px; opacity: 0.8; }
 
-/* screen toggle sits left of record; stop stays stacked above */
-#rec-row { display: flex; align-items: center; gap: 10px; }
 
 /* side-by-side screen playback: screen left, camera right, both whole */
 /* screen-split geometry is computed in JS (layoutSplit) — aspect-true rects */
@@ -700,3 +698,11 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 * { touch-action: manipulation; }
 .word, .gap { touch-action: pan-y; }
 #video-box, .dual, #scrubber { touch-action: none; }
+
+/* mobile: tighter cards (nesting shrinks slower), controls hug the corner */
+@media (max-width: 879px) {
+  #messages { padding: 12px 8px 130px; }
+  .msg { padding: 9px 8px 9px 10px; margin-bottom: 10px; }
+  .msg .msg { margin: 8px 0; }
+  #controls { right: 6px; bottom: calc(8px + env(safe-area-inset-bottom)); gap: 6px; }
+}
