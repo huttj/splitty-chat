@@ -421,6 +421,18 @@ function initMenu() {
   } else {
     $('#menu-devices').classList.add('hidden');
   }
+  // post an existing video file as a message
+  $('#upload-btn').onclick = () => {
+    if (!canRecordHere()) return showToast("You don't have permission to post here");
+    $('#upload-input').click();
+  };
+  $('#upload-input').onchange = () => {
+    const f = $('#upload-input').files[0];
+    $('#upload-input').value = '';
+    pop.classList.add('hidden');
+    uploadVideoFile(f);
+  };
+
   // transcription language: applies to new clips and to the ↻ retranscribe button
   $('#lang-sel').value = localStorage.getItem('splitty:lang') || '';
   $('#lang-sel').onchange = () => localStorage.setItem('splitty:lang', $('#lang-sel').value);
@@ -2216,6 +2228,57 @@ async function harvestAndRetranscribe(msg, btn) {
     showToast("Couldn't extract audio from that video on this device");
     if (btn) btn.disabled = false;
   }
+}
+
+// ---------- video file upload ----------
+// Post an existing video file as a message: extract its audio track in the
+// browser (for transcription + loudness), then ride the normal pipeline —
+// chunked upload, ghost card, layer routing, the works.
+async function uploadVideoFile(file) {
+  if (!file) return;
+  if (!file.type.startsWith('video/')) return showToast("That doesn't look like a video file");
+  if (file.size > 800 * 1024 * 1024) return showToast('That file is too large — try under 800MB');
+  showToast('Preparing your video…');
+
+  let audioBlob = null;
+  let durationMs = null;
+  try {
+    const ctx = new OfflineAudioContext(1, 1, 16000);
+    const decoded = await ctx.decodeAudioData(await file.arrayBuffer());
+    durationMs = Math.round(decoded.duration * 1000);
+    const ch0 = decoded.getChannelData(0);
+    let mono = ch0;
+    if (decoded.numberOfChannels > 1) {
+      const ch1 = decoded.getChannelData(1);
+      mono = new Float32Array(ch0.length);
+      for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2;
+    }
+    audioBlob = wavBlob(mono, decoded.sampleRate);
+  } catch { /* undecodable audio — upload anyway; transcript just won't exist */ }
+
+  if (durationMs == null) {
+    // duration fallback via a throwaway video element
+    durationMs = await new Promise(res => {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.onloadedmetadata = () => { const d = isFinite(v.duration) ? Math.round(v.duration * 1000) : null; URL.revokeObjectURL(v.src); res(d); };
+      v.onerror = () => res(null);
+      v.src = URL.createObjectURL(file);
+    });
+  }
+  if (durationMs && durationMs > MAX_RECORD_MS + 30_000 && !canEdit()) {
+    return showToast('Clips are capped at 10 minutes — editors can post longer videos');
+  }
+
+  const recLayer = canEdit() ? state.layer : canComment() ? '' : (state.auth?.user?.id || '');
+  enqueueUpload({
+    videoBlob: file,
+    audioBlob,
+    screenBlob: null,
+    durationMs,
+    rec: { parentId: null, anchorMs: null, resume: null, layer: recLayer },
+  });
+  showToast('Uploading — it appears in the chat when it lands');
 }
 
 // ---------- unsent-clip persistence ----------

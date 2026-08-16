@@ -977,8 +977,10 @@ async function createMessage(request, env, ctx, chatId) {
   const audio = form.get('audio'); // small audio-only track for transcription
   // a non-empty layer routes this into that person's private comment layer
   let layer = String(form.get('layer') || '') || null;
-  // 30s of slack over the client's auto-stop covers recorder stop latency
-  if (Number(form.get('durationMs')) > MAX_RECORD_MS + 30_000) {
+  // 30s of slack over the client's auto-stop covers recorder stop latency.
+  // Editors are exempt — uploading long-form pieces is their whole use case.
+  const overCap = Number(form.get('durationMs')) > MAX_RECORD_MS + 30_000;
+  if (overCap && !authEnabled(env)) {
     return json({ error: 'recordings are capped at 10 minutes', code: 'toolong' }, 400);
   }
 
@@ -999,6 +1001,9 @@ async function createMessage(request, env, ctx, chatId) {
       }
     } else if (!roleAtLeast(access.role, 'commenter')) {
       return json({ error: "you can watch this chat, but you don't have permission to record in it", code: 'role' }, 403);
+    }
+    if (overCap && access.role !== 'editor') {
+      return json({ error: 'clips are capped at 10 minutes', code: 'toolong' }, 400);
     }
     if (user.status === 'pending') {
       if (layer) {
