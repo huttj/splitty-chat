@@ -221,7 +221,10 @@ let audioCtx = null, compressorIn = null;
 function audioChainFor(el) {
   try {
     if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // 'playback' = bigger buffers: mobile underruns (dropouts that sound
+      // like skipped words, worst at raised speeds) trade for latency, which
+      // the word highlight compensates with the measured value
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' });
       const comp = audioCtx.createDynamicsCompressor();
       comp.threshold.value = -24;
       comp.knee.value = 12;
@@ -232,8 +235,12 @@ function audioChainFor(el) {
       makeup.gain.value = 1.25;
       comp.connect(makeup).connect(audioCtx.destination);
       compressorIn = comp;
-      // autoplay policy can leave the context suspended — any tap wakes it
-      document.addEventListener('pointerdown', () => audioCtx.resume(), { capture: true });
+      // autoplay policy can leave the context suspended — a tap wakes it,
+      // but only when something is actually playing (a paused context is
+      // also the fix for the mobile pause-stutter, so don't undo it)
+      document.addEventListener('pointerdown', () => {
+        if (players.some(p => !p.paused)) audioCtx.resume();
+      }, { capture: true });
     }
     if (!el._gainNode) {
       const src = audioCtx.createMediaElementSource(el);
@@ -1284,6 +1291,13 @@ function syncPlayButton() {
   const playing = state.playing && !activeEl().paused;
   $('#btn-play').classList.toggle('playing', playing);
   $('#pause-btn').classList.toggle('playing', playing);
+  // suspend the audio graph while nothing plays: Android Chrome otherwise
+  // loops the last buffer of a paused element (the machine-gun stutter)
+  if (audioCtx) {
+    const anyPlaying = players.some(p => !p.paused);
+    if (anyPlaying && audioCtx.state === 'suspended') audioCtx.resume();
+    else if (!anyPlaying && audioCtx.state === 'running') audioCtx.suspend();
+  }
 }
 
 // ---------- message tree ----------
@@ -1487,6 +1501,7 @@ const safePlay = el => el.play()?.catch(() => {
 
 function playSegment(idx, offset, autoplay = true) {
   if (state.rec) autoplay = false; // seeks are fine mid-recording; playing is not
+  if (autoplay && audioCtx?.state === 'suspended') audioCtx.resume();
   const seg = state.playlist[idx];
   const msg = state.byId.get(seg.id);
   if (!msg) return stopPlayback();
@@ -1633,6 +1648,7 @@ function stopPlayback() {
 
 function togglePause() {
   if (!state.playing || state.rec) return; // never un-pause under a recording
+  if (audioCtx?.state === 'suspended') audioCtx.resume(); // still in the tap's gesture
   const el = activeEl();
   el.paused ? el.play() : el.pause();
 }
@@ -1795,8 +1811,10 @@ function tickHighlight() {
   // through WebAudio (the compressor), whose output latency is tiny on
   // desktop but 100-500ms on mobile/Bluetooth — currentTime runs that far
   // ahead of what's actually HEARD, so compensate with the measured value.
+  // output latency is WALL-clock — at raised speeds the media clock runs
+  // rate× content-seconds ahead of the heard audio, so scale it
   const outLag = audioCtx ? (audioCtx.outputLatency || audioCtx.baseLatency || 0) : 0;
-  focusWordAt(seg, el.currentTime - state.wordLag - outLag, 'speaking');
+  focusWordAt(seg, el.currentTime - state.wordLag - outLag * (el.playbackRate || 1), 'speaking');
   tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);
