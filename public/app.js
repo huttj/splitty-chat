@@ -667,10 +667,54 @@ function initChat() {
     if (!pop.contains(e.target) && !$('#layer-pick').contains(e.target)) pop.classList.add('hidden');
   });
 
-  // double-click means "play from here", not "select this word" — but plain
-  // click-and-drag selection (copying transcript text) still works
-  $('#messages').addEventListener('mousedown', e => {
-    if (e.detail > 1) e.preventDefault();
+  // dragging across the transcript scrubs the playhead — words are a seek
+  // surface, not selectable text
+  let lastWordPreview = 0;
+  $('#messages').addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const startSpan = e.target.closest?.('.word, .gap');
+    if (!startSpan) return;
+    const start = { x: e.clientX, y: e.clientY };
+    let active = false;
+    const scrubTo = span => {
+      const msg = state.byId.get(span.dataset.mid);
+      if (!msg || span.dataset.t == null) return;
+      const vt = vtOfMsgTime(span.dataset.mid, Number(span.dataset.t) + 0.001);
+      if (vt == null) return;
+      $('#scrubber').value = vt;
+      updateTimeLabel(vt);
+      scrubFocus(vt);
+      const now = performance.now();
+      if (now - lastWordPreview > 150) {
+        lastWordPreview = now;
+        previewVirtual(vt);
+      }
+    };
+    const onMove = ev => {
+      if (!active) {
+        if (Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) < 8) return;
+        active = true;
+        // no session yet? park one at the grab point so scrubbing has a stage
+        if (!state.playing) playFrom(startSpan.dataset.mid, Number(startSpan.dataset.t) || 0, false);
+        state.scrubbing = true;
+        state.scrubResume = state.playing && !activeEl().paused;
+        clearWordHighlight();
+      }
+      const span = document.elementFromPoint(ev.clientX, ev.clientY)?.closest?.('.word, .gap');
+      if (span) scrubTo(span);
+    };
+    const onUp = () => {
+      document.removeEventListener('pointermove', onMove);
+      if (active) {
+        transcriptDragTs = performance.now();
+        state.scrubbing = false;
+        clearScrubFocus();
+        // land where the drag ended, restoring the play/pause state it began with
+        seekVirtual(Number($('#scrubber').value), state.scrubResume);
+      }
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp, { once: true });
   });
 
   $('#rec-btn').onclick = toggleRecord;
@@ -1265,11 +1309,19 @@ function playFrom(msgId, atSec, autoplay = true) {
 }
 
 // transcript click = seek only (keep playing if playing, stay paused if not);
-// double-click = seek and play. Makes placing comments precise: no more
-// pause-then-hunt.
+// double-click = seek and play; drag = scrub. Makes placing comments precise.
+let transcriptDragTs = 0; // the click that trails a drag isn't a seek
 function seekTranscript(msgId, atSec) {
+  if (performance.now() - transcriptDragTs < 350) return;
   const keepPlaying = state.playing && !activeEl().paused;
   playFrom(msgId, atSec, keepPlaying);
+}
+
+// message-time → virtual-timeline time, if it's in the current playlist
+function vtOfMsgTime(msgId, t) {
+  if (!state.playlist.length) buildPlaylist();
+  const seg = state.playlist.find(s => s.id === msgId && t >= s.start - 0.001 && t < s.end);
+  return seg ? seg.vStart + (t - seg.start) : null;
 }
 
 const safePlay = el => el.play()?.catch(() => {
@@ -2562,6 +2614,7 @@ function renderMessage(msg, depth, unlocked = false) {
     g.className = 'gap';
     g.dataset.mid = msg.id;
     g.dataset.gi = gi;
+    g.dataset.t = prevEnd; // scrub target, same shape as words
     g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
     g.title = `${gapSec.toFixed(1)}s pause`;
     g.onclick = () => seekTranscript(msg.id, prevEnd + 0.01);

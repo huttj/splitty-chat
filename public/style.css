@@ -683,3 +683,7 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
   z-index: 1; color: #3a3f4e; pointer-events: none;
 }
 #cam-off svg { width: 56px; height: 56px; fill: currentColor; display: block; }
+
+/* transcript is a scrub surface: drag moves the playhead, never selects */
+#messages { -webkit-user-select: none; user-select: none; }
+.word, .gap { touch-action: pan-y; } /* vertical scroll still works on touch */
