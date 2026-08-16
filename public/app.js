@@ -1242,7 +1242,7 @@ function silencesFor(msg) {
   const sil = [];
   let prev = 0;
   const consider = (from, to) => {
-    const s = from + 0.45, e = to - 0.25;
+    const s = from + 0.6, e = to - 0.3;
     if (to - from >= 1.0 && e - s >= 0.25) sil.push([s, e]);
   };
   for (const w of msg.words) {
@@ -1659,7 +1659,10 @@ function tickHighlight() {
       }
     }
   }
-  focusWordAt(seg, el.currentTime, 'speaking');
+  // Whisper timestamps run early relative to the audio, so an unbiased
+  // highlight is halfway through a word before it's spoken — lag the visual
+  // clock (only the glow; seeks and splice boundaries keep the raw times)
+  focusWordAt(seg, el.currentTime - 0.3, 'speaking');
   tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);
