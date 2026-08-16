@@ -1718,7 +1718,7 @@ function playSegment(idx, offset, autoplay = true) {
 // just follows it. Cheap to keep honest: seek on load, mirror play/pause, and
 // snap whenever drift exceeds a third of a second.
 function loadScreenFor(msg, at) {
-  if (!msg?.screenKey) return;
+  if (!msg?.screenKey || brokenScreens.has(msg.screenKey)) return;
   const sp = screenEl();
   const surl = `${location.origin}/media/${msg.screenKey}`;
   if (sp.srcObject) sp.srcObject = null; // playback takes the element over from live preview
@@ -1735,14 +1735,31 @@ function loadScreenFor(msg, at) {
   sp.playbackRate = state.speed;
 }
 
+const brokenScreens = new Set(); // screen tracks that errored or never loaded — play camera-only
+
 function tickScreenSync() {
   if (state.playIdx < 0) return;
   const seg = state.playlist[state.playIdx];
   const msg = state.byId.get(seg?.id);
-  if (!msg?.screenKey) { state.screenHold = false; return; }
+  if (!msg?.screenKey || brokenScreens.has(msg.screenKey)) { state.screenHold = false; return; }
   const sp = screenEl();
   if (sp.srcObject) return;
   const el = activeEl();
+
+  // a screen track that errors, or holds us longer than 15s, gets given up
+  // on — the conversation matters more than the screen half
+  const giveUp = sp.error
+    || (state.screenHold && performance.now() - (state.screenHoldTs || 0) > 15000);
+  if (giveUp) {
+    brokenScreens.add(msg.screenKey);
+    const held = state.screenHold;
+    state.screenHold = false;
+    showToast("The screen part of this clip won't load — playing the camera only");
+    updateStage(); // back to the normal camera layout
+    if (held) el.play().catch(() => {});
+    return;
+  }
+
   const dur = sp.duration || Infinity;
   const pastScreenEnd = el.currentTime > dur - 0.3; // screen track can be shorter — that's fine
   const screenReady = sp.readyState >= 3 || pastScreenEnd;
@@ -1763,6 +1780,7 @@ function tickScreenSync() {
   if (!screenReady) {
     el.pause();
     state.screenHold = true; // spinner shows; ticker resumes us
+    state.screenHoldTs = performance.now();
     return;
   }
   if (pastScreenEnd) {
@@ -1994,9 +2012,18 @@ function tickHighlight() {
   if (!el.paused) {
     // sanity: only enforce boundaries when the active element is actually
     // showing this segment's file — a scrub can briefly leave them mismatched,
-    // and advancing on the wrong clock ping-pongs segments (the "twitch")
+    // and advancing on the wrong clock ping-pongs segments (the "twitch").
+    // Match EITHER url form: the blob cache landing mid-playback changes what
+    // mediaUrl() returns without changing what the element is playing.
     const segMsg = state.byId.get(seg.id);
-    if (segMsg && el.src !== mediaUrl(segMsg)) return;
+    const srcOk = !segMsg
+      || el.src === mediaUrl(segMsg)
+      || el.src === `${location.origin}/media/${segMsg.file}`;
+    if (!srcOk) {
+      focusWordAt(seg, el.currentTime - state.wordLag, 'speaking');
+      tickScreenSync(); // never starve the screen half over a url-form mismatch
+      return;
+    }
     // content-time on both sides: active and standby play at the same rate,
     // so speed cancels out — never scale these thresholds by playbackRate
     const remain = seg.end - el.currentTime;
@@ -2093,7 +2120,8 @@ function onTimeUpdate() {
   const seg = state.playlist[state.playIdx];
   const t = activeEl().currentTime;
   const segMsg = state.byId.get(seg.id);
-  if (segMsg && activeEl().src !== mediaUrl(segMsg)) return; // mismatched after a scrub — don't advance on the wrong clock
+  if (segMsg && activeEl().src !== mediaUrl(segMsg)
+    && activeEl().src !== `${location.origin}/media/${segMsg.file}`) return; // mismatched after a scrub — don't advance on the wrong clock
 
   // fallback boundary check (frame ticker cuts tighter); file ends advance via 'ended'
   if (t >= seg.end - 0.05 && !isTailSeg(seg)) return advanceSegment(state.playIdx);
@@ -2957,7 +2985,7 @@ function updateStage() {
   // screen track of whatever's playing
   const seg = mode === 'play' && state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
   const curMsg = seg ? state.byId.get(seg.id) : null;
-  const screenPlay = mode === 'play' && !!curMsg?.screenKey;
+  const screenPlay = mode === 'play' && !!curMsg?.screenKey && !brokenScreens.has(curMsg.screenKey);
   const screenLive = mode !== 'play' && !!screenStream?.active;
   const sp = screenEl();
   if (screenLive && sp.srcObject !== screenStream) {
