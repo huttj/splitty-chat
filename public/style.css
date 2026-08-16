@@ -131,13 +131,13 @@ body {
 #video-box.fit-contain video { object-fit: contain; }
 #video-box.mode-play.fit-contain #preview,
 #video-box.mode-screenlive.fit-contain #preview { object-fit: cover; } /* corner PiP box already matches the video */
-#fit-btn {
-  position: absolute; top: 8px; left: 8px; z-index: 4;
+#box-btns { position: absolute; top: 8px; left: 8px; z-index: 4; display: flex; gap: 6px; }
+#box-btns button {
   background: rgba(0, 0, 0, 0.5); border: 0; color: #fff; cursor: pointer;
   border-radius: 8px; padding: 4px 9px; font-size: 11px; font-weight: 650;
   backdrop-filter: blur(4px); opacity: 0.75;
 }
-#fit-btn:hover { opacity: 1; }
+#box-btns button:hover { opacity: 1; }
 #cam-enable {
   position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 5;
   background: var(--accent); color: #fff; border: 0; border-radius: 12px;
@@ -524,13 +524,6 @@ body.role-viewer #splitter { bottom: 0; }
 #rec-row { display: flex; align-items: center; gap: 10px; }
 
 /* side-by-side screen playback: screen left, camera right, both whole */
-#split-btn {
-  position: absolute; top: 8px; left: 56px; z-index: 4;
-  background: rgba(0, 0, 0, 0.5); border: 0; color: #fff; cursor: pointer;
-  border-radius: 8px; padding: 4px 9px; font-size: 11px; font-weight: 650;
-  backdrop-filter: blur(4px); opacity: 0.75;
-}
-#split-btn:hover { opacity: 1; }
 #video-box.screen-split #screen-player { inset: 0 50% 0 0; width: 50%; object-fit: contain; }
 #video-box.screen-split video:not(#screen-player):not(#preview):not(.hidden) {
   inset: 0 0 0 50%; width: 50%; object-fit: contain; background: #000;
@@ -703,3 +696,14 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 
 /* video-file drop target */
 #messages.drop-hot { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
+
+/* portrait video box: split stacks screen on top, camera below */
+#video-box.screen-split.split-v #screen-player:not(.spip) { inset: 0 0 50% 0; width: 100%; }
+#video-box.screen-split.split-v video:not(#screen-player):not(#preview):not(.hidden) {
+  inset: 50% 0 0 0; width: 100%;
+}
+
+/* one zoom level, everywhere: no double-tap zoom (scroll/scrub still work) */
+* { touch-action: manipulation; }
+.word, .gap { touch-action: pan-y; }
+#video-box, .dual, #scrubber { touch-action: none; }

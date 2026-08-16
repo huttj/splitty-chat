@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=78">
+  <link rel="stylesheet" href="/style.css?v=81">
 </head>
 <body>
 
@@ -119,8 +119,11 @@
           <svg viewBox="0 0 24 24"><path d="M4.3 3 3 4.3l3 3H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h10c.5 0 .96-.19 1.31-.5l4.39 4.4 1.3-1.3L4.3 3zM16 10.6V9.3l4.4-2.5a.8.8 0 0 1 1.2.7v9a.8.8 0 0 1-1.2.7l-1.9-1.1L16 13.6v-3zM8.83 6H14a2 2 0 0 1 2 2v.17L8.83 6z"/></svg>
         </div>
         <div id="vid-spin" class="hidden"></div>
-        <button id="fit-btn" title="Toggle fill / fit">Fit</button>
-        <button id="split-btn" class="hidden" title="Screen and camera side by side / picture-in-picture">Split</button>
+        <div id="box-btns">
+          <button id="fit-btn" title="Toggle fill / fit">Fit</button>
+          <button id="split-btn" class="hidden" title="Screen and camera side by side / stacked / picture-in-picture">Split</button>
+          <button id="self-btn" class="hidden" title="Hide or show your own camera preview (camera stays on)">Hide me</button>
+        </div>
         <button id="cam-enable" class="hidden">Turn on camera</button>
       </div>
       <div id="transport">
@@ -307,6 +310,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=80"></script>
+  <script src="/app.js?v=81"></script>
 </body>
 </html>

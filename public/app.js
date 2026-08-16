@@ -48,6 +48,8 @@ const state = {
   silPad: (v => Number.isFinite(v) ? v : 0.7)(parseFloat(localStorage.getItem('splitty:silpad'))),
   // minimum silence that must survive the shoulders for a pause to be trimmed
   silMin: (v => Number.isFinite(v) ? v : 0.25)(parseFloat(localStorage.getItem('splitty:silmin'))),
+  // hide your own floating preview while watching (camera stays on)
+  selfHide: localStorage.getItem('splitty:selfhide') === '1',
 };
 
 // Editors flip through comment layers with the picker; everyone else just
@@ -775,6 +777,7 @@ function initChat() {
     if (!startSpan) return;
     const start = { x: e.clientX, y: e.clientY };
     let active = false;
+    let dead = false; // vertical intent — this drag belongs to the scroller
     const scrubTo = (span, clientX) => {
       const msg = state.byId.get(span.dataset.mid);
       if (!msg || span.dataset.t == null) return;
@@ -796,8 +799,16 @@ function initChat() {
       }
     };
     const onMove = ev => {
+      if (dead) return;
+      const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
       if (!active) {
-        if (Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) < 8) return;
+        // axis lock: a vertical-leaning drag is a SCROLL, not a scrub —
+        // hand it to the browser and stay out of the way (the mobile fix)
+        if (Math.abs(dy) > 12 && Math.abs(dy) > Math.abs(dx)) {
+          dead = true;
+          return;
+        }
+        if (Math.abs(dx) < 10 || Math.abs(dx) < Math.abs(dy) * 1.2) return;
         active = true;
         // no session yet? park one at the grab point so scrubbing has a stage
         if (!state.playing) playFrom(startSpan.dataset.mid, Number(startSpan.dataset.t) || 0, false);
@@ -826,6 +837,11 @@ function initChat() {
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;
   $('#pause-btn').onclick = togglePause;
+  $('#self-btn').onclick = () => {
+    state.selfHide = !state.selfHide;
+    localStorage.setItem('splitty:selfhide', state.selfHide ? '1' : '');
+    updateStage();
+  };
 
   // hide pauses = clip them: transcript gaps disappear AND playback skips the
   // silence, so the timeline/timestamps compress to speech-only time
@@ -1437,6 +1453,22 @@ function seekTranscript(msgId, atSec) {
   if (performance.now() - transcriptDragTs < 350) return;
   const keepPlaying = state.playing && !activeEl().paused;
   playFrom(msgId, atSec, keepPlaying);
+}
+
+// unified tap handling: one tap seeks, a second tap on the same spot within
+// 350ms plays. Hand-rolled because mobile browsers don't reliably deliver
+// dblclick — this works identically for mouse and touch.
+let lastTap = { t: 0, key: '' };
+function tapTranscript(msgId, atSec) {
+  if (performance.now() - transcriptDragTs < 350) return;
+  const key = `${msgId}@${atSec.toFixed(2)}`;
+  if (performance.now() - lastTap.t < 350 && lastTap.key === key) {
+    lastTap = { t: 0, key: '' };
+    playFrom(msgId, atSec);
+    return;
+  }
+  lastTap = { t: performance.now(), key };
+  seekTranscript(msgId, atSec);
 }
 
 // message-time → virtual-timeline time, if it's in the current playlist
@@ -2607,6 +2639,9 @@ function pipHoverCursor(e) {
 
 function relayoutPips() {
   const box = $('#video-box');
+  if (box.classList.contains('screen-split')) {
+    box.classList.toggle('split-v', box.clientHeight > box.clientWidth);
+  }
   if (box.classList.contains('mode-play') || box.classList.contains('mode-screenlive')) {
     layoutPip(preview, pips.cam);
   }
@@ -2684,7 +2719,15 @@ function updateStage() {
     else clearPip(el);
   }
 
-  preview.classList.toggle('hidden', !camStream);
+  // self-view toggle: hides your floating preview while watching, never
+  // while recording (there it's the main view, or the proof-of-capture pip)
+  const selfIsPip = mode === 'play' || (screenLive && mode !== 'record');
+  $('#self-btn').classList.toggle('hidden', !(camStream && selfIsPip));
+  $('#self-btn').textContent = state.selfHide ? 'Show me' : 'Hide me';
+  preview.classList.toggle('hidden', !camStream || (state.selfHide && selfIsPip));
+  // portrait boxes stack the split top/bottom instead of side by side
+  if (split) box.classList.toggle('split-v', box.clientHeight > box.clientWidth);
+  else box.classList.remove('split-v');
   // never a silently empty box: show the camera-off glyph when the stage
   // would be showing your camera but there's no stream
   $('#cam-off').classList.toggle('hidden', !(mode !== 'play' && !camStream && !screenLive));
@@ -2941,8 +2984,7 @@ function renderMessage(msg, depth, unlocked = false) {
     g.dataset.e = nextStart;
     g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
     g.title = `${gapSec.toFixed(1)}s pause`;
-    g.onclick = () => seekTranscript(msg.id, prevEnd + 0.01);
-    g.ondblclick = () => playFrom(msg.id, prevEnd + 0.01);
+    g.onclick = () => tapTranscript(msg.id, prevEnd + 0.01);
     return g;
   };
   const flushWordsUntil = untilSec => {
@@ -2961,8 +3003,7 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.t = w.s;
       span.dataset.e = w.e;
       span.textContent = w.w;
-      span.onclick = () => seekTranscript(msg.id, w.s + 0.001);
-      span.ondblclick = () => playFrom(msg.id, w.s + 0.001);
+      span.onclick = () => tapTranscript(msg.id, w.s + 0.001);
       frag.appendChild(span);
       frag.appendChild(document.createTextNode(' '));
       wi++;
