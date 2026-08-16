@@ -41,6 +41,8 @@ const state = {
   // comment layer being viewed: '' = the base conversation, else a user id.
   // Recording routes into whatever you're viewing.
   layer: '',
+  // visual lag for the spoken-word glow (Whisper stamps run early) — tunable
+  wordLag: (v => Number.isFinite(v) ? v : 0.3)(parseFloat(localStorage.getItem('splitty:wordlag'))),
 };
 
 // Editors flip through comment layers with the picker; everyone else just
@@ -416,6 +418,17 @@ function initMenu() {
   // transcription language: applies to new clips and to the ↻ retranscribe button
   $('#lang-sel').value = localStorage.getItem('splitty:lang') || '';
   $('#lang-sel').onchange = () => localStorage.setItem('splitty:lang', $('#lang-sel').value);
+
+  // spoken-word glow timing: 0 = trust Whisper's stamps, higher = glow later
+  const lag = $('#lag-range'), lagLabel = $('#lag-label');
+  const paintLag = () => (lagLabel.textContent = `${Math.round(state.wordLag * 1000)}ms`);
+  lag.value = state.wordLag;
+  paintLag();
+  lag.oninput = () => {
+    state.wordLag = +lag.value;
+    localStorage.setItem('splitty:wordlag', String(state.wordLag));
+    paintLag();
+  };
 }
 
 // Safari only grants the camera from a real tap — retry on the first gesture,
@@ -1661,8 +1674,10 @@ function tickHighlight() {
   }
   // Whisper timestamps run early relative to the audio, so an unbiased
   // highlight is halfway through a word before it's spoken — lag the visual
-  // clock (only the glow; seeks and splice boundaries keep the raw times)
-  focusWordAt(seg, el.currentTime - 0.3, 'speaking');
+  // clock (only the glow; seeks and splice boundaries keep the raw times).
+  // The error varies (silence gets folded into word spans), so the lag is
+  // user-tunable from the menu.
+  focusWordAt(seg, el.currentTime - state.wordLag, 'speaking');
   tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);

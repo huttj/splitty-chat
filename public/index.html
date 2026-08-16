@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=67">
+  <link rel="stylesheet" href="/style.css?v=72">
 </head>
 <body>
 
@@ -47,6 +47,12 @@
       </label>
       <button id="bell-btn" class="menu-row hidden" title="Notifications"></button>
       <button id="name-btn" class="menu-row" title="Change your display name"></button>
+      <div id="menu-tuning">
+        <div class="menu-div"></div>
+        <label>Highlight delay <b id="lag-label"></b>
+          <input type="range" id="lag-range" min="0" max="0.7" step="0.05">
+        </label>
+      </div>
       <div id="menu-devices">
         <div class="menu-div"></div>
         <label>Camera<select id="cam-sel"></select></label>
@@ -293,6 +299,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=71"></script>
+  <script src="/app.js?v=72"></script>
 </body>
 </html>
