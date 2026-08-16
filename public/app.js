@@ -1561,6 +1561,7 @@ const safePlay = el => el.play()?.catch(() => {
 function playSegment(idx, offset, autoplay = true) {
   if (state.rec) autoplay = false; // seeks are fine mid-recording; playing is not
   if (autoplay && audioCtx?.state === 'suspended') audioCtx.resume();
+  state.screenHold = false; // fresh segment, fresh buffering verdict
   const seg = state.playlist[idx];
   const msg = state.byId.get(seg.id);
   if (!msg) return stopPlayback();
@@ -1643,15 +1644,37 @@ function tickScreenSync() {
   if (state.playIdx < 0) return;
   const seg = state.playlist[state.playIdx];
   const msg = state.byId.get(seg?.id);
-  if (!msg?.screenKey) return;
+  if (!msg?.screenKey) { state.screenHold = false; return; }
   const sp = screenEl();
-  if (sp.srcObject || sp.readyState < 1) return;
+  if (sp.srcObject) return;
   const el = activeEl();
+  const dur = sp.duration || Infinity;
+  const pastScreenEnd = el.currentTime > dur - 0.3; // screen track can be shorter — that's fine
+  const screenReady = sp.readyState >= 3 || pastScreenEnd;
+
+  // we paused the camera to let the screen half buffer — release when ready
+  if (state.screenHold) {
+    if (screenReady) {
+      state.screenHold = false;
+      el.play().catch(() => {});
+    }
+    return;
+  }
   if (el.paused) {
+    if (!sp.paused) sp.pause();
+    return;
+  }
+  // camera is running: the halves move together or not at all
+  if (!screenReady) {
+    el.pause();
+    state.screenHold = true; // spinner shows; ticker resumes us
+    return;
+  }
+  if (pastScreenEnd) {
     if (!sp.paused) sp.pause();
   } else {
     if (sp.paused) sp.play().catch(() => {});
-    if (Math.abs(sp.currentTime - el.currentTime) > 0.35) sp.currentTime = el.currentTime;
+    if (Math.abs(sp.currentTime - el.currentTime) > 0.35 && !sp.seeking) sp.currentTime = el.currentTime;
   }
   if (sp.playbackRate !== state.speed) sp.playbackRate = state.speed;
 }
@@ -1697,6 +1720,7 @@ function advanceSegment(fromIdx = state.playIdx) {
 function stopPlayback() {
   state.playing = false;
   state.playIdx = -1;
+  state.screenHold = false;
   for (const el of players) { el.pause(); el._preparedKey = null; }
   screenEl().pause();
   updateStage();
@@ -2655,7 +2679,7 @@ function updateVidSpinner() {
   const spin = $('#vid-spin');
   if (!state.playing || state.playIdx < 0) return spin.classList.add('hidden');
   const el = activeEl();
-  spin.classList.toggle('hidden', !(el.readyState < 2 || el._waiting));
+  spin.classList.toggle('hidden', !(el.readyState < 2 || el._waiting || state.screenHold));
 }
 
 // only transient status (recording timer, upload state) — empty hides the pill.
