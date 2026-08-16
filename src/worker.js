@@ -798,6 +798,51 @@ export default {
         return json({ ok: true, anchorMs });
       }
 
+      // one chunk of a split transcription (long clips arrive as several small
+      // WAVs with time offsets). The Whisper call is AWAITED, not waitUntil'd:
+      // the client sends chunks serially, so responses are the backpressure
+      // that keeps the worker from juggling concurrent merges.
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)\/transcribe-chunk$/)) && request.method === 'POST') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const row = await env.DB
+          .prepare('SELECT author, user_id, layer_user_id, text, words FROM messages WHERE id = ? AND chat_id = ?')
+          .bind(m[2], m[1]).first();
+        if (!row) return json({ error: 'not found' }, 404);
+        const form = await request.formData();
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        const allowed = authEnabled(env)
+          ? access.role === 'editor' || (!!access.role && ownsMessage(user, row, form.get('author')))
+          : ownsMessage(user, row, form.get('author'));
+        if (!allowed) return json({ error: 'only the author or an editor can transcribe this' }, 403);
+        const audio = form.get('audio');
+        if (!(audio instanceof File) || !audio.size) return json({ error: 'missing audio' }, 400);
+        if (audio.size > 10 * 1024 * 1024) return json({ error: 'chunk too big' }, 400);
+        const offset = Math.max(0, Number(form.get('offsetMs')) || 0) / 1000;
+        const isLast = form.get('last') === '1';
+
+        let merged = JSON.parse(row.words || '[]');
+        let text = row.text || '';
+        try {
+          const out = await runWhisper(env, await audio.arrayBuffer(), cleanLang(form.get('lang')));
+          merged = [...merged, ...out.words.map(w => ({ w: w.w, s: w.s + offset, e: w.e + offset }))]
+            .sort((a, b) => a.s - b.s);
+          text = [text, out.text].filter(Boolean).join(' ');
+        } catch (err) {
+          console.error(`chunk transcription failed for ${m[2]} @${offset}s:`, String(err));
+        }
+        const status = isLast ? (merged.length ? 'done' : 'failed') : 'pending';
+        await env.DB.prepare('UPDATE messages SET text = ?, words = ?, transcript_status = ? WHERE id = ?')
+          .bind(text, JSON.stringify(merged), status, m[2]).run();
+        if (isLast) {
+          ctx.waitUntil(notifyNewMessage(env, {
+            id: m[2], chatId: m[1], userId: row.user_id, author: row.author, layer: row.layer_user_id,
+          }));
+        }
+        return json({ ok: true, words: merged.length, status });
+      }
+
       // re-run transcription (optionally pinning a language) — author or editor
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)\/transcribe$/)) && request.method === 'POST') {
         const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
@@ -1104,7 +1149,11 @@ async function createMessage(request, env, ctx, chatId) {
 
   // transcribe after the response goes out; client polls for the result.
   // Push notifications wait for the transcript so they can quote the message.
-  if (transcriptBuf) {
+  // Long clips instead announce chunked transcription: the client streams
+  // audio chunks to /transcribe-chunk, and the LAST chunk finalizes + notifies.
+  if (form.get('chunkedTranscript')) {
+    // status stays 'pending'; nothing to do here
+  } else if (transcriptBuf) {
     const lang = cleanLang(form.get('lang'));
     ctx.waitUntil(transcribe(env, msg.id, transcriptBuf, lang).then(() => notifyNewMessage(env, msg)));
   } else {
@@ -1117,20 +1166,26 @@ async function createMessage(request, env, ctx, chatId) {
 
 const cleanLang = s => (typeof s === 'string' && /^[a-z]{2,3}$/i.test(s.trim()) ? s.trim().toLowerCase() : '');
 
+async function runWhisper(env, audioBuf, language = '') {
+  const out = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
+    audio: toBase64(audioBuf),
+    ...(language && { language }), // pin it when auto-detect guesses wrong
+  });
+  const raw = out.words?.length
+    ? out.words
+    : (out.segments || []).flatMap(s => s.words || []);
+  return {
+    text: (out.text || '').trim(),
+    words: raw
+      .filter(w => w.word != null && w.start != null && w.end != null)
+      .map(w => ({ w: String(w.word).trim(), s: w.start, e: w.end })),
+  };
+}
+
 async function transcribe(env, messageId, audioBuf, language = '') {
   let status = 'failed', text = '', words = [];
   try {
-    const out = await env.AI.run('@cf/openai/whisper-large-v3-turbo', {
-      audio: toBase64(audioBuf),
-      ...(language && { language }), // pin it when auto-detect guesses wrong
-    });
-    text = (out.text || '').trim();
-    const raw = out.words?.length
-      ? out.words
-      : (out.segments || []).flatMap(s => s.words || []);
-    words = raw
-      .filter(w => w.word != null && w.start != null && w.end != null)
-      .map(w => ({ w: String(w.word).trim(), s: w.start, e: w.end }));
+    ({ text, words } = await runWhisper(env, audioBuf, language));
     status = 'done';
   } catch (err) {
     console.error(`transcription failed for ${messageId}:`, String(err));

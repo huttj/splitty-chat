@@ -2104,6 +2104,10 @@ async function runUploads() {
       await poll();    // ...to the real message, in the same render pass
       uploader.jobs.shift();
       dropPending(job.jid);
+      if (job.chunks?.length) {
+        // long clip: transcript streams in chunk by chunk, off the queue's back
+        sendTranscriptChunks(message.id, job.chunks);
+      }
     } catch (err) {
       uploader.jobs.shift();
       state.lastRenderKey = ''; // drop the placeholder card
@@ -2185,15 +2189,23 @@ async function uploadJob(job) {
   if (screenBlob && screenBlob.size && !job.screenKey) job.screenKey = await chunkUpload(screenBlob, onBytes);
 
   // file uploads extract their audio in parallel with the chunks — collect it
+  let pcm = null;
   if (job.audioPromise) {
-    const a = await job.audioPromise.catch(() => null);
-    if (a && !job.audioBlob) {
-      job.audioBlob = a.blob;
-      job.durationMs ||= a.durationMs;
-    }
+    pcm = await job.audioPromise.catch(() => null);
+    if (pcm) job.durationMs ||= pcm.durationMs;
     job.audioPromise = null;
   }
-  const audioBlob = job.audioBlob;
+  let audioBlob = job.audioBlob;
+  let pcmGain = null;
+  if (pcm && !audioBlob) {
+    pcmGain = gainFromSamples(pcm.mono);
+    if ((job.durationMs || 0) > 240_000) {
+      // long clip: transcript arrives as a serial chunk stream after the post
+      job.chunks = splitAudio(pcm.mono, pcm.rate);
+    } else {
+      audioBlob = wavBlob(pcm.mono, pcm.rate);
+    }
+  }
 
   // the message itself is now a small request: keys + the ~64kbps audio track
   const fd = new FormData();
@@ -2201,7 +2213,10 @@ async function uploadJob(job) {
   if (job.screenKey) fd.append('screenKey', job.screenKey);
   if (audioBlob && audioBlob.size) {
     fd.append('audio', audioBlob, `audio.${audioBlob.type.includes('mp4') ? 'm4a' : audioBlob.type.includes('wav') ? 'wav' : 'webm'}`);
-    fd.append('gain', String(await measureGain(audioBlob)));
+    fd.append('gain', String(pcmGain ?? await measureGain(audioBlob)));
+  } else if (job.chunks) {
+    fd.append('chunkedTranscript', '1');
+    if (pcmGain != null) fd.append('gain', String(pcmGain));
   }
   fd.append('author', state.name || 'anon');
   fd.append('durationMs', String(job.durationMs));
@@ -2277,7 +2292,7 @@ async function harvestAndRetranscribe(msg, btn) {
 // Post an existing video file as a message: extract its audio track in the
 // browser (for transcription + loudness), then ride the normal pipeline —
 // chunked upload, ghost card, layer routing, the works.
-// decode the audio track out of a video file → 16kHz-ish mono WAV
+// decode the audio track out of a video file → mono PCM (WAV built as needed)
 async function extractAudio(file) {
   const ctx = new OfflineAudioContext(1, 1, 16000);
   const decoded = await ctx.decodeAudioData(await file.arrayBuffer());
@@ -2288,7 +2303,74 @@ async function extractAudio(file) {
     mono = new Float32Array(ch0.length);
     for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2;
   }
-  return { blob: wavBlob(mono, decoded.sampleRate), durationMs: Math.round(decoded.duration * 1000) };
+  return { mono, rate: decoded.sampleRate, durationMs: Math.round(decoded.duration * 1000) };
+}
+
+// same loudness math as measureGain, straight off PCM samples
+function gainFromSamples(mono) {
+  let sum = 0, n = 0;
+  for (let i = 0; i < mono.length; i += 2048) {
+    let s = 0;
+    const end = Math.min(i + 2048, mono.length);
+    for (let j = i; j < end; j++) s += mono[j] * mono[j];
+    const rms = Math.sqrt(s / (end - i));
+    if (rms > 0.01) { sum += rms; n++; }
+  }
+  if (!n) return 1;
+  return Math.min(Math.max(0.1 / (sum / n), 0.5), 4);
+}
+
+// Split PCM into ~3-minute chunks, cutting at the quietest 50ms window near
+// each boundary so no word gets sliced. Returns [{offsetMs, blob}] ready for
+// the serial /transcribe-chunk stream.
+const CHUNK_SEC = 180;
+function splitAudio(mono, rate) {
+  const cuts = [];
+  let start = 0;
+  while (mono.length - start > (CHUNK_SEC + 60) * rate) { // never leave a runt tail
+    const target = start + CHUNK_SEC * rate;
+    const lo = Math.max(start + 60 * rate, target - 15 * rate);
+    const hi = Math.min(mono.length - 30 * rate, target + 15 * rate);
+    const win = Math.floor(rate * 0.05);
+    let best = target, bestE = Infinity;
+    for (let i = lo; i + win < hi; i += win) {
+      let e = 0;
+      for (let j = i; j < i + win; j++) e += mono[j] * mono[j];
+      if (e < bestE) { bestE = e; best = i + (win >> 1); }
+    }
+    cuts.push({ start, end: best });
+    start = best;
+  }
+  cuts.push({ start, end: mono.length });
+  return cuts.map(c => ({
+    offsetMs: Math.round((c.start / rate) * 1000),
+    blob: wavBlob(mono.subarray(c.start, c.end), rate),
+  }));
+}
+
+// stream the chunks in order; each response is the go-ahead for the next.
+// A failed chunk (after one retry) is skipped — the rest of the transcript
+// still lands, and the last chunk always finalizes the message.
+async function sendTranscriptChunks(msgId, chunks) {
+  const lang = localStorage.getItem('splitty:lang') || '';
+  for (let i = 0; i < chunks.length; i++) {
+    const fd = new FormData();
+    fd.append('audio', chunks[i].blob, 'chunk.wav');
+    fd.append('offsetMs', String(chunks[i].offsetMs));
+    fd.append('author', state.name || '');
+    if (lang) fd.append('lang', lang);
+    if (i === chunks.length - 1) fd.append('last', '1');
+    let ok = false;
+    for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+      try {
+        ok = (await fetch(`/api/chats/${state.chatId}/messages/${msgId}/transcribe-chunk`, {
+          method: 'POST', body: fd,
+        })).ok;
+      } catch { /* network blip */ }
+      if (!ok) await new Promise(r => setTimeout(r, 2000));
+    }
+    poll(); // fresh words appear in the transcript as each chunk lands
+  }
 }
 
 // fast duration read: container metadata only, no decode
@@ -2332,9 +2414,13 @@ async function uploadVideoFile(file) {
   enqueueUpload(job);
   audioPromise.then(a => {
     if (!a) return;
-    job.audioBlob = a.blob;
     job.durationMs ||= a.durationMs;
-    savePending(job); // the crash-recovery copy gets the audio track too
+    if (a.durationMs <= 240_000) {
+      // short clip: one inline audio track, and the crash-recovery copy gets it
+      job.audioBlob = wavBlob(a.mono, a.rate);
+      savePending(job);
+    }
+    // long clips split at send time; recovery re-extracts from the video file
   });
   showToast(anchor.parentId ? 'Uploading — it splices in right where you were' : 'Uploading — it appears in the chat when it lands');
 }
@@ -2387,6 +2473,10 @@ async function restorePendingUploads() {
       jid: r.id,
       videoBlob: r.videoBlob, audioBlob: r.audioBlob, screenBlob: r.screenBlob,
       durationMs: r.durationMs,
+      // a recovered file upload without its audio re-extracts from the video
+      audioPromise: !r.audioBlob && r.videoBlob?.type?.startsWith('video/')
+        ? extractAudio(r.videoBlob).catch(() => null)
+        : null,
       rec: { parentId: r.parentId, anchorMs: r.anchorMs, resume: null, layer: r.layer || '' },
     }))
   );
