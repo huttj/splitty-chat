@@ -279,10 +279,14 @@ function paintScreenBtn() {
 }
 async function ensureCam() {
   if (camStream && camStream.active) return camStream;
+  // saved device choices ride along as 'ideal' — a missing device (unplugged
+  // webcam, other machine) falls back instead of failing
+  const camId = localStorage.getItem('splitty:camid');
+  const micId = localStorage.getItem('splitty:micid');
   try {
     camStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 960 } },
-      audio: true,
+      video: { facingMode: 'user', width: { ideal: 960 }, ...(camId && { deviceId: { ideal: camId } }) },
+      audio: micId ? { deviceId: { ideal: micId } } : true,
     });
   } catch (err) {
     camError = err;
@@ -296,6 +300,75 @@ async function ensureCam() {
   preview.play();
   updateStage();
   return camStream;
+}
+
+// ---------- device picker ----------
+async function fillDeviceLists() {
+  const devs = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+  const fill = (sel, kind, savedKey, fallbackLabel) => {
+    sel.innerHTML = '';
+    let i = 1;
+    for (const d of devs.filter(dd => dd.kind === kind)) {
+      const o = document.createElement('option');
+      o.value = d.deviceId;
+      o.textContent = d.label || `${fallbackLabel} ${i}`;
+      sel.appendChild(o);
+      i++;
+    }
+    // show what's actually in use, else the saved preference
+    const tracks = kind === 'videoinput' ? camStream?.getVideoTracks() : camStream?.getAudioTracks();
+    const activeId = tracks?.[0]?.getSettings().deviceId;
+    const want = activeId || localStorage.getItem(savedKey);
+    if (want && [...sel.options].some(o => o.value === want)) sel.value = want;
+  };
+  fill($('#cam-sel'), 'videoinput', 'splitty:camid', 'Camera');
+  fill($('#mic-sel'), 'audioinput', 'splitty:micid', 'Microphone');
+}
+
+// swap the live stream to the picked devices (preview + future recordings)
+async function applyDevicePick() {
+  if (state.rec) {
+    showToast('Finish this clip first — devices switch between recordings');
+    fillDeviceLists(); // snap the selects back to what's actually in use
+    return;
+  }
+  localStorage.setItem('splitty:camid', $('#cam-sel').value);
+  localStorage.setItem('splitty:micid', $('#mic-sel').value);
+  camStream?.getTracks().forEach(t => t.stop());
+  camStream = null;
+  try {
+    await ensureCam();
+  } catch {
+    showToast("Couldn't open that camera — check it isn't in use elsewhere");
+  }
+  fillDeviceLists();
+}
+
+function initDevicePicker() {
+  const btn = $('#dev-btn'), pop = $('#dev-pop');
+  if (!navigator.mediaDevices?.getUserMedia) return;
+  btn.classList.remove('hidden');
+  btn.onclick = async e => {
+    e.stopPropagation();
+    if (pop.classList.contains('hidden')) {
+      // labels only exist once the camera permission is granted
+      if (!camStream) await ensureCam().catch(() => {});
+      await fillDeviceLists();
+      pop.classList.remove('hidden');
+    } else {
+      pop.classList.add('hidden');
+    }
+  };
+  document.addEventListener('pointerdown', e => {
+    // btn.contains: clicks land on the svg inside the button, and this runs
+    // before the button's own click toggle — don't fight it
+    if (!pop.contains(e.target) && !btn.contains(e.target)) pop.classList.add('hidden');
+  });
+  navigator.mediaDevices.addEventListener?.('devicechange', () => {
+    if (!pop.classList.contains('hidden')) fillDeviceLists();
+  });
+  $('#cam-sel').onchange = applyDevicePick;
+  $('#mic-sel').onchange = applyDevicePick;
 }
 
 // Safari only grants the camera from a real tap — retry on the first gesture,
@@ -530,6 +603,7 @@ function initChat() {
     if (e.target === $('#share-gate')) $('#share-gate').classList.add('hidden');
   });
   initPush();
+  initDevicePicker();
   restorePendingUploads();
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
@@ -1566,6 +1640,7 @@ async function toggleRecord() {
   if (screenRecorder) screenRecorder.onstop = onStop;
 
   $('#rec-btn').classList.add('recording');
+  $('#dev-pop').classList.add('hidden'); // no device swaps mid-clip
 
   state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume };
   recorder.start();
