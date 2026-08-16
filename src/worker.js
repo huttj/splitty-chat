@@ -747,11 +747,24 @@ export default {
           ? access.role === 'editor' || (roleAtLeast(access.role, 'commenter') && ownsMessage(user, row, body.author))
           : ownsMessage(user, row, body.author);
         if (!allowed) return json({ error: 'only the author or an editor can retranscribe this' }, 403);
-        const obj = await env.MEDIA.get(row.audio_key || row.video_key);
+        // the client can hand us a freshly-harvested audio track (extracted
+        // from the video in the browser) — it becomes the stored one
+        let srcKey = row.audio_key || row.video_key;
+        if (body.audioKey) {
+          const claimed = await claimUploadedKey(env, body.audioKey);
+          if (!claimed) return json({ error: 'bad audio key' }, 400);
+          if (row.audio_key && row.audio_key !== claimed.key) {
+            await env.MEDIA.delete(row.audio_key); // replaced — don't strand the old track
+          }
+          await env.DB.prepare('UPDATE messages SET audio_key = ? WHERE id = ?').bind(claimed.key, m[2]).run();
+          srcKey = claimed.key;
+        }
+        const obj = await env.MEDIA.get(srcKey);
         if (!obj) return json({ error: 'media missing' }, 404);
         if (obj.size > 24 * 1024 * 1024) {
-          // older message without a stored voice track — the full video won't fit in Worker memory
-          return json({ error: "this clip predates stored audio tracks and its video is too big to retranscribe" }, 400);
+          // no stored voice track and the full video won't fit in Worker
+          // memory — the client offers to extract the audio locally instead
+          return json({ error: 'the video is too big to transcribe whole', code: 'toobig' }, 400);
         }
         await env.DB.prepare("UPDATE messages SET transcript_status = 'pending' WHERE id = ?").bind(m[2]).run();
         const buf = await obj.arrayBuffer();
@@ -799,7 +812,10 @@ export default {
         if (action === '' && request.method === 'POST') {
           const { mime } = await request.json();
           const clean = String(mime || 'video/webm').split(';')[0];
-          const ext = { 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[clean] || 'webm';
+          const ext = {
+            'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+            'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/mp4': 'm4a',
+          }[clean] || 'webm';
           const key = `${slug(16)}.${ext}`;
           const mpu = await env.MEDIA.createMultipartUpload(key, { httpMetadata: { contentType: clean } });
           return json({ key, uploadId: mpu.uploadId });
@@ -846,7 +862,7 @@ export default {
 };
 
 const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced — 10 minutes each
-const UPLOAD_KEY_RE = /^[A-Za-z0-9_-]{16}\.(webm|mp4|mov)$/;
+const UPLOAD_KEY_RE = /^[A-Za-z0-9_-]{16}\.(webm|mp4|mov|wav|m4a)$/;
 
 // chunked-upload routes share the message-posting gate: signed-in, not
 // blocked, commenter or better in this chat (name-only mode stays open)
@@ -868,8 +884,8 @@ async function claimUploadedKey(env, key) {
   if (typeof key !== 'string' || !UPLOAD_KEY_RE.test(key)) return null;
   const head = await env.MEDIA.head(key);
   if (!head) return null;
-  const ref = await env.DB.prepare('SELECT 1 AS x FROM messages WHERE video_key = ? OR screen_key = ?')
-    .bind(key, key).first();
+  const ref = await env.DB.prepare('SELECT 1 AS x FROM messages WHERE video_key = ? OR screen_key = ? OR audio_key = ?')
+    .bind(key, key, key).first();
   if (ref) return null;
   return { key, mime: head.httpMetadata?.contentType || 'video/webm' };
 }

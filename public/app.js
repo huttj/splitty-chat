@@ -1837,6 +1837,63 @@ async function uploadJob(job) {
   return await jfetch(`/api/chats/${state.chatId}/messages`, { method: 'POST', body: fd });
 }
 
+// ---------- audio harvesting ----------
+// Old messages predate stored voice tracks, and their videos are too big to
+// feed Whisper whole. The browser can demux for us: decodeAudioData pulls the
+// audio out of the video container, we downsample to 16kHz mono WAV (all
+// Whisper uses anyway), upload that, and the server keeps it as the message's
+// audio track — so this only ever has to happen once per message.
+function wavBlob(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + samples.length * 2, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  ws(36, 'data'); v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function harvestAndRetranscribe(msg, btn) {
+  try {
+    showToast('Pulling the audio out of the video — this can take a moment…');
+    const res = await fetch(mediaUrl(msg));
+    if (!res.ok) throw new Error('fetch');
+    // decodeAudioData resamples to the context rate; mix to mono ourselves
+    const ctx = new OfflineAudioContext(1, 1, 16000);
+    const decoded = await ctx.decodeAudioData(await res.arrayBuffer());
+    const ch0 = decoded.getChannelData(0);
+    let mono = ch0;
+    if (decoded.numberOfChannels > 1) {
+      const ch1 = decoded.getChannelData(1);
+      mono = new Float32Array(ch0.length);
+      for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2;
+    }
+    const wav = wavBlob(mono, decoded.sampleRate);
+    showToast('Uploading the extracted audio…');
+    const key = await chunkUpload(wav, () => {});
+    const r = await fetch(`/api/chats/${state.chatId}/messages/${msg.id}/transcribe`, {
+      method: 'POST', headers: JSONH,
+      body: JSON.stringify({
+        author: state.name,
+        language: localStorage.getItem('splitty:lang') || '',
+        audioKey: key,
+      }),
+    });
+    if (!r.ok) throw new Error('transcribe');
+    showToast('Retranscribing…');
+    state.lastRenderKey = '';
+    poll();
+  } catch {
+    showToast("Couldn't extract audio from that video on this device");
+    if (btn) btn.disabled = false;
+  }
+}
+
 // ---------- unsent-clip persistence ----------
 // Recordings live only in memory while uploading; IndexedDB keeps a copy (it
 // holds Blobs, unlike localStorage) so a refresh or crash can't eat a clip.
@@ -2279,6 +2336,8 @@ function renderMessage(msg, depth, unlocked = false) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      // video too big to feed Whisper whole — extract the audio right here
+      if (data.code === 'toobig') return harvestAndRetranscribe(msg, retrBtn);
       retrBtn.disabled = false;
       return showToast(data.error || "Couldn't retranscribe that one");
     }
