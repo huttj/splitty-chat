@@ -1764,11 +1764,15 @@ function tickScreenSync() {
   const pastScreenEnd = el.currentTime > dur - 0.3; // screen track can be shorter — that's fine
   const screenReady = sp.readyState >= 3 || pastScreenEnd;
 
-  // we paused the camera to let the screen half buffer — release when ready
+  // we paused the camera to let the screen half buffer — release when ready.
+  // Crucially, DRIVE the buffering: a paused, never-played element often
+  // won't load past its first frame on its own (this stalled healthy files).
   if (state.screenHold) {
     if (screenReady) {
       state.screenHold = false;
       el.play().catch(() => {});
+    } else if (sp.paused && !sp.error) {
+      sp.play().catch(() => {}); // muted; drift-snap realigns it on release
     }
     return;
   }
@@ -1834,6 +1838,7 @@ function stopPlayback() {
   state.playing = false;
   state.playIdx = -1;
   state.screenHold = false;
+  brokenScreens.clear(); // a stop is a clean slate — give screen tracks another shot
   for (const el of players) { el.pause(); el._preparedKey = null; }
   screenEl().pause();
   updateStage();
