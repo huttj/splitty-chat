@@ -359,17 +359,16 @@ async function applyDevicePick() {
   fillDeviceLists();
 }
 
-function initDevicePicker() {
-  const btn = $('#dev-btn'), pop = $('#dev-pop');
-  if (!navigator.mediaDevices?.getUserMedia) return;
-  btn.classList.remove('hidden');
-  btn.onclick = async e => {
-    e.stopPropagation();
+// the ⋮ menu: pauses toggle, notifications, name/sign-out, device pickers
+function initMenu() {
+  const btn = $('#menu-btn'), pop = $('#menu-pop');
+  btn.onclick = async () => {
     if (pop.classList.contains('hidden')) {
-      // labels only exist once the camera permission is granted
-      if (!camStream) await ensureCam().catch(() => {});
-      await fillDeviceLists();
       pop.classList.remove('hidden');
+      // device labels only exist once camera permission is granted — warm it
+      // for people who can record here; pure viewers never get prompted
+      if (!camStream && canRecordHere()) await ensureCam().catch(() => {});
+      fillDeviceLists();
     } else {
       pop.classList.add('hidden');
     }
@@ -379,13 +378,16 @@ function initDevicePicker() {
     // before the button's own click toggle — don't fight it
     if (!pop.contains(e.target) && !btn.contains(e.target)) pop.classList.add('hidden');
   });
-  navigator.mediaDevices.addEventListener?.('devicechange', () => {
-    if (!pop.classList.contains('hidden')) fillDeviceLists();
-  });
-  $('#cam-sel').onchange = applyDevicePick;
-  $('#mic-sel').onchange = applyDevicePick;
-  // transcription language rides along in the same panel; applies to new
-  // clips and to the ↻ retranscribe button on message cards
+  if (navigator.mediaDevices?.getUserMedia) {
+    navigator.mediaDevices.addEventListener?.('devicechange', () => {
+      if (!pop.classList.contains('hidden')) fillDeviceLists();
+    });
+    $('#cam-sel').onchange = applyDevicePick;
+    $('#mic-sel').onchange = applyDevicePick;
+  } else {
+    $('#menu-devices').classList.add('hidden');
+  }
+  // transcription language: applies to new clips and to the ↻ retranscribe button
   $('#lang-sel').value = localStorage.getItem('splitty:lang') || '';
   $('#lang-sel').onchange = () => localStorage.setItem('splitty:lang', $('#lang-sel').value);
 }
@@ -622,12 +624,13 @@ function initChat() {
     if (e.target === $('#share-gate')) $('#share-gate').classList.add('hidden');
   });
   initPush();
-  initDevicePicker();
+  initMenu();
   initTimeline();
   restorePendingUploads();
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;
+  $('#pause-btn').onclick = togglePause;
 
   // hide pauses = clip them: transcript gaps disappear AND playback skips the
   // silence, so the timeline/timestamps compress to speech-only time
@@ -1047,7 +1050,9 @@ function cueAt(idx, at, autoplay = false) {
 // an already-playing element that never fires a fresh 'play' event, so the
 // button must be derived, not event-toggled.
 function syncPlayButton() {
-  $('#btn-play').classList.toggle('playing', state.playing && !activeEl().paused);
+  const playing = state.playing && !activeEl().paused;
+  $('#btn-play').classList.toggle('playing', playing);
+  $('#pause-btn').classList.toggle('playing', playing);
 }
 
 // ---------- message tree ----------
@@ -1192,7 +1197,7 @@ function renderTicks() {
 }
 
 // ---------- playback ----------
-function playFrom(msgId, atSec) {
+function playFrom(msgId, atSec, autoplay = true) {
   buildPlaylist();
   let idx = state.playlist.findIndex(
     s => s.id === msgId && atSec >= s.start - 0.001 && atSec < s.end
@@ -1203,7 +1208,15 @@ function playFrom(msgId, atSec) {
     if (idx === -1) return;
     atSec = Math.min(atSec, state.playlist[idx].end - 0.05);
   }
-  playSegment(idx, Math.max(atSec, state.playlist[idx].start));
+  playSegment(idx, Math.max(atSec, state.playlist[idx].start), autoplay);
+}
+
+// transcript click = seek only (keep playing if playing, stay paused if not);
+// double-click = seek and play. Makes placing comments precise: no more
+// pause-then-hunt.
+function seekTranscript(msgId, atSec) {
+  const keepPlaying = state.playing && !activeEl().paused;
+  playFrom(msgId, atSec, keepPlaying);
 }
 
 const safePlay = el => el.play()?.catch(() => {
@@ -1764,7 +1777,7 @@ async function toggleRecord() {
   if (screenRecorder) screenRecorder.onstop = onStop;
 
   $('#rec-btn').classList.add('recording');
-  $('#dev-pop').classList.add('hidden'); // no device swaps mid-clip
+  $('#menu-pop').classList.add('hidden'); // no device swaps mid-clip
 
   state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume, layer: state.layer };
   recorder.start();
@@ -2166,6 +2179,7 @@ function updateStage() {
   // record button telegraphs what it'll do: splice into the conversation vs new message
   $('#rec-btn').classList.toggle('splice', mode === 'play');
   $('#stop-btn').classList.toggle('hidden', mode !== 'play');
+  $('#pause-btn').classList.toggle('hidden', mode !== 'play');
   paintScreenBtn();
   if (mode === 'none') { stage.classList.add('hidden'); return; }
   if (mode === 'enable') {
@@ -2465,7 +2479,8 @@ function renderMessage(msg, depth, unlocked = false) {
     g.dataset.gi = gi;
     g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
     g.title = `${gapSec.toFixed(1)}s pause`;
-    g.onclick = () => playFrom(msg.id, prevEnd + 0.01);
+    g.onclick = () => seekTranscript(msg.id, prevEnd + 0.01);
+    g.ondblclick = () => playFrom(msg.id, prevEnd + 0.01);
     return g;
   };
   const flushWordsUntil = untilSec => {
@@ -2483,7 +2498,8 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.i = wi;
       span.dataset.t = w.s;
       span.textContent = w.w;
-      span.onclick = () => playFrom(msg.id, w.s + 0.001);
+      span.onclick = () => seekTranscript(msg.id, w.s + 0.001);
+      span.ondblclick = () => playFrom(msg.id, w.s + 0.001);
       frag.appendChild(span);
       frag.appendChild(document.createTextNode(' '));
       wi++;
@@ -3122,8 +3138,8 @@ async function disablePush() {
 function paintPush() {
   if (!push.supported) return;
   const bell = $('#bell-btn');
-  bell.textContent = push.sub ? '🔔' : '🔕';
-  bell.title = push.sub ? 'Notifications on (all your chats) — tap to turn off' : 'Get notified about new messages';
+  bell.textContent = push.sub ? '🔔 Notifications on' : '🔕 Notifications off';
+  bell.title = push.sub ? 'Covers all your chats — tap to turn off' : 'Get notified about new messages';
   bell.classList.toggle('bell-on', !!push.sub);
   // the nudge: signed-in participants (can record here) without push on this
   // device — viewers don't care, so they're never nagged

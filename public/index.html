@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=56">
+  <link rel="stylesheet" href="/style.css?v=57">
 </head>
 <body>
 
@@ -25,13 +25,42 @@
       <a href="/" class="logo">splitty</a>
       <div class="header-actions">
         <select id="layer-sel" class="hidden" title="Whose comments you're viewing — recordings go where you're looking"></select>
+        <button id="screen-btn" class="btn-ghost hidden" title="Share your screen — while it's on, recordings include it">
+          <svg class="ic" viewBox="0 0 16 16"><path d="M1.5 2A1.5 1.5 0 0 0 0 3.5v7A1.5 1.5 0 0 0 1.5 12h4.9l-.37 1.5H4.5a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-1.53L9.6 12h4.9a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 14.5 2h-13z"/></svg>
+        </button>
         <button id="lens-btn" class="btn-ghost" title="Slice the conversation by time and reply depth">Timeline</button>
-        <button id="gaps-btn" class="btn-ghost" title="Show or hide pauses in transcripts">Hide pauses</button>
-        <button id="bell-btn" class="btn-ghost hidden" title="Notifications"></button>
-        <button id="name-btn" class="btn-ghost" title="Change your display name"></button>
         <button id="share-btn" class="btn-ghost">Share</button>
+        <button id="menu-btn" class="btn-ghost" title="Menu">
+          <svg class="ic" viewBox="0 0 16 16"><path d="M8 4.4a1.45 1.45 0 1 1 0-2.9 1.45 1.45 0 0 1 0 2.9zm0 5.05a1.45 1.45 0 1 1 0-2.9 1.45 1.45 0 0 1 0 2.9zm0 5.05a1.45 1.45 0 1 1 0-2.9 1.45 1.45 0 0 1 0 2.9z"/></svg>
+        </button>
       </div>
     </header>
+
+    <div id="menu-pop" class="hidden">
+      <button id="gaps-btn" class="menu-row" title="Show or hide pauses in transcripts">Hide pauses</button>
+      <button id="bell-btn" class="menu-row hidden" title="Notifications"></button>
+      <button id="name-btn" class="menu-row" title="Change your display name"></button>
+      <div id="menu-devices">
+        <div class="menu-div"></div>
+        <label>Camera<select id="cam-sel"></select></label>
+        <label>Microphone<select id="mic-sel"></select></label>
+        <label>Transcription language<select id="lang-sel">
+          <option value="">Auto-detect</option>
+          <option value="en">English</option>
+          <option value="es">Español</option>
+          <option value="fr">Français</option>
+          <option value="de">Deutsch</option>
+          <option value="pt">Português</option>
+          <option value="it">Italiano</option>
+          <option value="hi">हिन्दी</option>
+          <option value="ja">日本語</option>
+          <option value="ko">한국어</option>
+          <option value="zh">中文</option>
+          <option value="ru">Русский</option>
+          <option value="ar">العربية</option>
+        </select></label>
+      </div>
+    </div>
 
     <div id="history-bar" class="hidden">
       <div id="hist-bars"></div>
@@ -105,31 +134,10 @@
       <button id="stop-btn" class="hidden" title="Stop — next recording starts a new message">
         <span class="stop-square"></span>
       </button>
-      <div id="dev-pop" class="hidden">
-        <label>Camera<select id="cam-sel"></select></label>
-        <label>Microphone<select id="mic-sel"></select></label>
-        <label>Transcription language<select id="lang-sel">
-          <option value="">Auto-detect</option>
-          <option value="en">English</option>
-          <option value="es">Español</option>
-          <option value="fr">Français</option>
-          <option value="de">Deutsch</option>
-          <option value="pt">Português</option>
-          <option value="it">Italiano</option>
-          <option value="hi">हिन्दी</option>
-          <option value="ja">日本語</option>
-          <option value="ko">한국어</option>
-          <option value="zh">中文</option>
-          <option value="ru">Русский</option>
-          <option value="ar">العربية</option>
-        </select></label>
-      </div>
       <div id="rec-row">
-        <button id="dev-btn" class="hidden" title="Camera &amp; microphone">
-          <svg class="ic" viewBox="0 0 16 16"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h6A1.5 1.5 0 0 1 11 4.5v.9l2.9-1.7a.7.7 0 0 1 1.1.6v7.4a.7.7 0 0 1-1.1.6L11 10.6v.9A1.5 1.5 0 0 1 9.5 13h-6A1.5 1.5 0 0 1 2 11.5v-7zm1.5 0v7h6v-7h-6zm10 1.6L11 7.4v1.2l2.5 1.3V6.1z"/></svg>
-        </button>
-        <button id="screen-btn" class="hidden" title="Share your screen — while it's on, recordings include it">
-          <svg class="ic" viewBox="0 0 16 16"><path d="M1.5 2.5h13a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H9.8l.4 1.5h1.3a.75.75 0 0 1 0 1.5H4.5a.75.75 0 0 1 0-1.5h1.3l.4-1.5H1.5a1 1 0 0 1-1-1v-8a1 1 0 0 1 1-1zm.5 1.5v7h12V4H2z"/></svg>
+        <button id="pause-btn" class="hidden" title="Play/pause">
+          <svg class="ic ic-play" viewBox="0 0 16 16"><path d="M4.5 2.2 13.5 8l-9 5.8z"/></svg>
+          <svg class="ic ic-pause" viewBox="0 0 16 16"><path d="M3.5 2.5h3.4v11H3.5zM9.1 2.5h3.4v11H9.1z"/></svg>
         </button>
         <button id="rec-btn" aria-label="record">
           <span class="rec-dot"></span>
@@ -271,6 +279,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=56"></script>
+  <script src="/app.js?v=57"></script>
 </body>
 </html>
