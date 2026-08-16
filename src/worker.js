@@ -787,8 +787,10 @@ export default {
         const user = await getUser(request, env);
         const access = await chatAccess(env, user, chat);
         // name-only mode has no real roles — keep it author-only there
+        // owning the message is enough — comment authors are often mere
+        // 'viewers' role-wise, but their own clips are theirs to move
         const canMove = authEnabled(env)
-          ? access.role === 'editor' || (roleAtLeast(access.role, 'commenter') && ownsMessage(user, row, body.author))
+          ? access.role === 'editor' || (!!access.role && ownsMessage(user, row, body.author))
           : ownsMessage(user, row, body.author);
         if (!canMove) return json({ error: 'only the author or an editor can move this' }, 403);
         const anchorMs = Math.max(0, Math.round(Number(body.anchorMs) || 0));
@@ -808,7 +810,7 @@ export default {
         const user = await getUser(request, env);
         const access = await chatAccess(env, user, chat);
         const allowed = authEnabled(env)
-          ? access.role === 'editor' || (roleAtLeast(access.role, 'commenter') && ownsMessage(user, row, body.author))
+          ? access.role === 'editor' || (!!access.role && ownsMessage(user, row, body.author))
           : ownsMessage(user, row, body.author);
         if (!allowed) return json({ error: 'only the author or an editor can retranscribe this' }, 403);
         // the client can hand us a freshly-harvested audio track (extracted
@@ -848,7 +850,7 @@ export default {
         const user = await getUser(request, env);
         const access = await chatAccess(env, user, chat);
         const canDelete = authEnabled(env)
-          ? access.role === 'editor' || (roleAtLeast(access.role, 'commenter') && ownsMessage(user, row, body.author))
+          ? access.role === 'editor' || (!!access.role && ownsMessage(user, row, body.author))
           : ownsMessage(user, row, body.author);
         if (!canDelete) return json({ error: 'only the author or an editor can delete this' }, 403);
         if (row.parent_id) {
