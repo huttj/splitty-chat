@@ -2,7 +2,8 @@ CREATE TABLE IF NOT EXISTS chats (
   id TEXT PRIMARY KEY,
   created_at INTEGER NOT NULL,
   owner_id TEXT,                                  -- creator; NULL = legacy open chat. Added to live DB 2026-08-15 via ALTER
-  visibility TEXT NOT NULL DEFAULT 'private'      -- 'private' | 'public'. Added to live DB 2026-08-15 via ALTER
+  visibility TEXT NOT NULL DEFAULT 'private',     -- 'private' | 'public'. Added to live DB 2026-08-15 via ALTER
+  comments INTEGER NOT NULL DEFAULT 0             -- viewers may comment in their own layer. Added to live DB 2026-08-15 via ALTER
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -20,7 +21,8 @@ CREATE TABLE IF NOT EXISTS messages (
   transcript_status TEXT NOT NULL DEFAULT 'pending',
   gain REAL DEFAULT 1,     -- client-measured loudness correction; added to live DB 2026-08-14 via ALTER
   screen_key TEXT,         -- companion screen-share video in R2; added to live DB 2026-08-15 via ALTER
-  audio_key TEXT           -- stored voice track (retranscription source); added to live DB 2026-08-15 via ALTER
+  audio_key TEXT,          -- stored voice track (retranscription source); added to live DB 2026-08-15 via ALTER
+  layer_user_id TEXT       -- NULL = base conversation; else the commenter whose private layer this belongs to. ALTER 2026-08-15
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);

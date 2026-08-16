@@ -191,6 +191,8 @@ const rowToMessage = r => ({
   gain: r.gain ?? 1,
   picture: r.picture || null,
   screenKey: r.screen_key || null,
+  layer: r.layer_user_id || null,
+  userId: r.user_id || null,
 });
 
 export default {
@@ -438,13 +440,21 @@ export default {
             .bind(chat.id, user.id).first();
           return json({ error: 'this chat is private', code: 'private', requested: !!req }, 403);
         }
-        const { results } = await env.DB
+        const { results: allRows } = await env.DB
           .prepare(`SELECT msg.*, u.picture FROM messages msg
                     LEFT JOIN users u ON u.id = msg.user_id
                     WHERE msg.chat_id = ? ORDER BY msg.created_at`)
           .bind(m[1]).all();
+        // comment layers are private-ish: editors see them all, everyone else
+        // only their own; the base conversation is visible to anyone with access
+        const results = allRows.filter(r =>
+          !r.layer_user_id || access.role === 'editor' || (user && r.layer_user_id === user.id));
         const payload = {
-          chat: { id: chat.id, createdAt: chat.created_at, visibility: chat.visibility || 'private', ownerId: chat.owner_id },
+          chat: {
+            id: chat.id, createdAt: chat.created_at,
+            visibility: chat.visibility || 'private', ownerId: chat.owner_id,
+            comments: !!chat.comments,
+          },
           myRole: access.role,
           isOwner: !!access.isOwner,
           viaInvite: !!access.viaInvite,
@@ -488,10 +498,15 @@ export default {
         const user = await getUser(request, env);
         const access = await chatAccess(env, user, chat);
         if (access.role !== 'editor') return json({ error: 'editors only' }, 403);
-        const { visibility } = await request.json();
-        if (!['private', 'public'].includes(visibility)) return json({ error: 'bad visibility' }, 400);
-        await env.DB.prepare('UPDATE chats SET visibility = ? WHERE id = ?').bind(visibility, chat.id).run();
-        return json({ ok: true, visibility });
+        const patch = await request.json();
+        if (patch.visibility !== undefined) {
+          if (!['private', 'public'].includes(patch.visibility)) return json({ error: 'bad visibility' }, 400);
+          await env.DB.prepare('UPDATE chats SET visibility = ? WHERE id = ?').bind(patch.visibility, chat.id).run();
+        }
+        if (patch.comments !== undefined) {
+          await env.DB.prepare('UPDATE chats SET comments = ? WHERE id = ?').bind(patch.comments ? 1 : 0, chat.id).run();
+        }
+        return json({ ok: true });
       }
 
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/members$/)) && request.method === 'POST') {
@@ -894,6 +909,16 @@ async function createMessage(request, env, ctx, chatId) {
   const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(chatId).first();
   if (!chat) return json({ error: 'not found' }, 404);
 
+  const form = await request.formData();
+  const video = form.get('video');
+  const audio = form.get('audio'); // small audio-only track for transcription
+  // a non-empty layer routes this into that person's private comment layer
+  let layer = String(form.get('layer') || '') || null;
+  // 30s of slack over the client's auto-stop covers recorder stop latency
+  if (Number(form.get('durationMs')) > MAX_RECORD_MS + 30_000) {
+    return json({ error: 'recordings are capped at 10 minutes', code: 'toolong' }, 400);
+  }
+
   // approvals only apply once auth is configured; name-only mode stays open
   let user = null;
   if (authEnabled(env)) {
@@ -901,7 +926,15 @@ async function createMessage(request, env, ctx, chatId) {
     if (!user) return json({ error: 'sign in to send messages', code: 'auth' }, 401);
     if (user.status === 'blocked') return json({ error: 'your account is blocked', code: 'blocked' }, 403);
     const access = await chatAccess(env, user, chat);
-    if (!roleAtLeast(access.role, 'commenter')) {
+    if (layer) {
+      // commenting: needs the chat's comments switch on and at least view
+      // access; you write into your own layer, editors into anyone's
+      if (!chat.comments) return json({ error: 'comments are off for this chat', code: 'role' }, 403);
+      if (!access.role) return json({ error: 'no access to this chat', code: 'role' }, 403);
+      if (layer !== user.id && access.role !== 'editor') {
+        return json({ error: "you can only comment in your own layer", code: 'role' }, 403);
+      }
+    } else if (!roleAtLeast(access.role, 'commenter')) {
       return json({ error: "you can watch this chat, but you don't have permission to record in it", code: 'role' }, 403);
     }
     if (user.status === 'pending') {
@@ -911,14 +944,8 @@ async function createMessage(request, env, ctx, chatId) {
         return json({ error: 'you can send one message until an admin approves you — hang tight', code: 'pending' }, 403);
       }
     }
-  }
-
-  const form = await request.formData();
-  const video = form.get('video');
-  const audio = form.get('audio'); // small audio-only track for transcription
-  // 30s of slack over the client's auto-stop covers recorder stop latency
-  if (Number(form.get('durationMs')) > MAX_RECORD_MS + 30_000) {
-    return json({ error: 'recordings are capped at 10 minutes', code: 'toolong' }, 400);
+  } else {
+    layer = null; // layers need accounts — name-only mode has none
   }
 
   const extFor = mm => ({ 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[mm] || 'webm');
@@ -961,6 +988,7 @@ async function createMessage(request, env, ctx, chatId) {
     parentId,
     anchorMs: parentId ? Math.max(0, Number(form.get('anchorMs')) || 0) : null,
     screenKey,
+    layer,
     durationMs: Number(form.get('durationMs')) || null,
     gain: Math.min(Math.max(Number(form.get('gain')) || 1, 0.25), 4),
     createdAt: Date.now(),
@@ -982,9 +1010,9 @@ async function createMessage(request, env, ctx, chatId) {
   }
 
   await env.DB.prepare(
-    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, audio_key, duration_ms, gain, created_at, transcript_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
-  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, audioKey, msg.durationMs, msg.gain, msg.createdAt).run();
+    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, audio_key, layer_user_id, duration_ms, gain, created_at, transcript_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
+  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, audioKey, msg.layer, msg.durationMs, msg.gain, msg.createdAt).run();
 
   // transcribe after the response goes out; client polls for the result.
   // Push notifications wait for the transcript so they can quote the message.
@@ -1123,17 +1151,27 @@ async function pushToUsers(env, userIds, payload) {
   await Promise.all(results.map(sub => sendPush(env, sub, payload)));
 }
 
-// after transcription lands: "Joshua said “first few words…”" to every member
+// after transcription lands: quote the message to whoever can hear it.
+// Base messages → every member. Comment-layer messages → the editors (who can
+// see all layers) plus the layer's owner (an editor may have replied in it).
 async function notifyNewMessage(env, msg) {
-  const { results } = await env.DB.prepare('SELECT user_id FROM chat_members WHERE chat_id = ?')
-    .bind(msg.chatId).all();
+  let targets;
+  if (msg.layer) {
+    const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(msg.chatId).first();
+    targets = chat ? [...await chatEditorIds(env, chat), msg.layer] : [msg.layer];
+  } else {
+    const { results } = await env.DB.prepare('SELECT user_id FROM chat_members WHERE chat_id = ?')
+      .bind(msg.chatId).all();
+    targets = results.map(r => r.user_id);
+  }
   const row = await env.DB.prepare('SELECT text FROM messages WHERE id = ?').bind(msg.id).first();
   const text = (row?.text || '').trim();
+  const quote = text ? `“${text.length > 90 ? text.slice(0, 90) + '…' : text}”` : 'sent a video note';
   await pushToUsers(env,
-    results.map(r => r.user_id).filter(id => id !== msg.userId),
+    targets.filter(id => id !== msg.userId),
     {
       title: `${msg.author} · splitty`,
-      body: text ? `“${text.length > 90 ? text.slice(0, 90) + '…' : text}”` : 'sent a video note',
+      body: msg.layer ? `commented: ${quote}` : quote,
       url: `/c/${msg.chatId}`,
       tag: `chat-${msg.chatId}`,
     });

@@ -38,7 +38,12 @@ const state = {
   // view lens: time window over message creation + reply-depth fold level.
   // expanded = per-subtree overrides (fold chips that were clicked open).
   filter: { t0: null, t1: null, depth: Infinity, expanded: new Set() },
+  // comment layer being viewed: '' = the base conversation, else a user id.
+  // Recording routes into whatever you're viewing.
+  layer: '',
 };
+
+const layerOk = m => !m.layer || m.layer === state.layer;
 
 const inWindow = m =>
   (state.filter.t0 == null || m.createdAt >= state.filter.t0) &&
@@ -47,10 +52,13 @@ const inWindow = m =>
 let lastPipSwap = 0; // suppress the click that trails a PiP swap tap
 
 const ROLE_RANK = { viewer: 1, commenter: 2, editor: 3 };
-// can this person record here? (name-only dev mode stays open)
+// can this person record into the base conversation? (name-only mode stays open)
 const canComment = () =>
   !state.auth?.authEnabled || (ROLE_RANK[state.myRole] || 0) >= ROLE_RANK.commenter;
 const canEdit = () => !!state.auth?.authEnabled && state.myRole === 'editor';
+// ...and can they record at all, counting comment layers?
+const canRecordHere = () =>
+  canComment() || !!(state.chatMeta?.comments && state.auth?.user && state.myRole);
 
 // name comparison is forgiving about case/whitespace so "Josh " on your phone
 // still owns what "josh" recorded on your laptop
@@ -926,6 +934,7 @@ async function poll() {
     state.invites = data.invites || [];
     state.requests = data.requests || [];
     if (data.myRole !== undefined) setRole(data.myRole);
+    updateLayerSel();
     render();
     refreshTimelinePanel();
     if (!$('#share-gate').classList.contains('hidden')) renderShare();
@@ -971,7 +980,7 @@ function hideLocked() {
 function setRole(role) {
   const changed = state.myRole !== role;
   state.myRole = role;
-  document.body.classList.toggle('role-viewer', !canComment());
+  document.body.classList.toggle('role-viewer', !canRecordHere());
   const n = state.requests.length;
   $('#share-btn').textContent = canEdit() && n ? `Share (${n})` : 'Share';
   paintPush(); // the notification nudge depends on the role (participants only)
@@ -1051,13 +1060,13 @@ function syncPlayButton() {
 const hasVisibleParent = m => {
   if (!m.parentId) return false;
   const p = state.byId.get(m.parentId);
-  return !!p && inWindow(p);
+  return !!p && inWindow(p) && layerOk(p);
 };
 const roots = () => state.messages
-  .filter(m => inWindow(m) && !hasVisibleParent(m))
+  .filter(m => inWindow(m) && layerOk(m) && !hasVisibleParent(m))
   .sort((a, b) => a.createdAt - b.createdAt);
 const childrenOf = id =>
-  state.messages.filter(m => m.parentId === id && inWindow(m))
+  state.messages.filter(m => m.parentId === id && inWindow(m) && layerOk(m))
     .sort((a, b) => (a.anchorMs - b.anchorMs) || (a.createdAt - b.createdAt));
 
 // is this child visible at the current fold level? `unlocked` = an ancestor's
@@ -1587,7 +1596,52 @@ function remapPlayback() {
   prepareNext(idx);
 }
 
-// view lens changed (time window, depth, or a fold chip) — rebuild everything
+// ---------- comment layers ----------
+// The dropdown picks whose comments you're viewing; recordings route into
+// whatever's selected. Editors get every layer; everyone else just their own.
+let lastLayerSelKey = '';
+function updateLayerSel() {
+  const sel = $('#layer-sel');
+  const me = state.auth?.user;
+  const commentsOn = !!state.chatMeta?.comments;
+  const layered = state.messages.some(mm => mm.layer);
+  const show = !!state.auth?.authEnabled && (commentsOn || layered);
+  sel.classList.toggle('hidden', !show);
+  if (!show) {
+    if (state.layer) { state.layer = ''; refreshFilter(); }
+    return;
+  }
+  const opts = [['', 'Conversation']];
+  if (canEdit()) {
+    const layers = new Map();
+    for (const mm of state.messages) {
+      if (!mm.layer || layers.has(mm.layer)) continue;
+      // label a layer by its owner: the commenter's own message names it
+      const owner = state.messages.find(o => o.layer === mm.layer && o.userId === mm.layer);
+      layers.set(mm.layer, mm.layer === me?.id ? 'My comments' : `${(owner || mm).author} · comments`);
+    }
+    if (me && commentsOn && !layers.has(me.id)) layers.set(me.id, 'My comments');
+    for (const [id, label] of layers) opts.push([id, label]);
+  } else if (me && (commentsOn || state.messages.some(mm => mm.layer === me.id))) {
+    opts.push([me.id, 'My comments']);
+  }
+  const key = JSON.stringify(opts);
+  if (key !== lastLayerSelKey) {
+    lastLayerSelKey = key;
+    sel.innerHTML = '';
+    for (const [v, label] of opts) {
+      sel.appendChild(Object.assign(document.createElement('option'), { value: v, textContent: label }));
+    }
+  }
+  if (![...sel.options].some(o => o.value === state.layer)) state.layer = '';
+  sel.value = state.layer;
+  sel.onchange = () => {
+    state.layer = sel.value;
+    refreshFilter();
+  };
+}
+
+// view lens changed (time window, depth, layer, or a fold chip) — rebuild everything
 function refreshFilter() {
   state.lastRenderKey = '';
   if (state.playing) remapPlayback();
@@ -1603,7 +1657,22 @@ const CAM_BITRATE = 1_100_000;
 
 async function toggleRecord() {
   if (state.rec) return stopRecord();
-  if (!canComment()) return showToast("You're watching this chat — ask an editor for record access");
+  if (!canComment()) {
+    const me = state.auth?.user;
+    if (state.chatMeta?.comments && me && state.myRole) {
+      // viewers record into their own comment layer; flip the view there so
+      // the recording lands where they're looking
+      if (state.layer !== me.id) {
+        state.layer = me.id;
+        const sel = $('#layer-sel');
+        if (sel && [...sel.options].some(o => o.value === me.id)) sel.value = me.id;
+        refreshFilter();
+        showToast('Recording into your comments — only you and the editors see them');
+      }
+    } else {
+      return showToast("You're watching this chat — ask an editor for record access");
+    }
+  }
 
   // interjecting? capture where we are, pause the playback
   let parentId = null, anchorMs = null, resume = null;
@@ -1697,7 +1766,7 @@ async function toggleRecord() {
   $('#rec-btn').classList.add('recording');
   $('#dev-pop').classList.add('hidden'); // no device swaps mid-clip
 
-  state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume };
+  state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume, layer: state.layer };
   recorder.start();
   audioRecorder.start();
   screenRecorder?.start();
@@ -1839,6 +1908,7 @@ async function uploadJob(job) {
   fd.append('durationMs', String(durationMs));
   const lang = localStorage.getItem('splitty:lang');
   if (lang) fd.append('lang', lang); // pin the transcription language
+  if (rec.layer) fd.append('layer', rec.layer); // route into a comment layer
   if (rec.parentId) {
     fd.append('parentId', rec.parentId);
     fd.append('anchorMs', String(rec.anchorMs));
@@ -1932,6 +2002,7 @@ const savePending = job => idbPending('readwrite', s => s.put({
   id: job.jid, chatId: state.chatId, ts: Date.now(),
   videoBlob: job.videoBlob, audioBlob: job.audioBlob, screenBlob: job.screenBlob,
   durationMs: job.durationMs, parentId: job.rec.parentId, anchorMs: job.rec.anchorMs,
+  layer: job.rec.layer || '',
 }));
 const dropPending = jid => idbPending('readwrite', s => s.delete(jid));
 
@@ -1951,7 +2022,7 @@ async function restorePendingUploads() {
       jid: r.id,
       videoBlob: r.videoBlob, audioBlob: r.audioBlob, screenBlob: r.screenBlob,
       durationMs: r.durationMs,
-      rec: { parentId: r.parentId, anchorMs: r.anchorMs, resume: null },
+      rec: { parentId: r.parentId, anchorMs: r.anchorMs, resume: null, layer: r.layer || '' },
     }))
   );
 }
@@ -2325,6 +2396,7 @@ function renderMessage(msg, depth, unlocked = false) {
     <span class="time">${fmtTime(msg.createdAt)}</span>
     <span class="dur">${fmtClock(msgDur(msg))}</span>
     ${msg.screenKey ? '<span class="screen-tag" title="Includes a screen share">🖥</span>' : ''}
+    ${msg.layer ? '<span class="screen-tag" title="Comment — visible to its author and the editors">💬</span>' : ''}
     ${isNew ? '<span class="badge">new</span>' : ''}
     <span class="spacer"></span>
     ${(mine || canEdit()) && depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}
@@ -2717,7 +2789,7 @@ function renderShare() {
   // polls call this every 2.5s while the panel is open — only rebuild the DOM
   // when the underlying data changed, so open menus/half-typed text survive
   const key = JSON.stringify([
-    editor, state.chatMeta?.ownerId, state.chatMeta?.visibility,
+    editor, state.chatMeta?.ownerId, state.chatMeta?.visibility, state.chatMeta?.comments,
     state.members, state.invites, state.requests, state.friends,
   ]);
   if (key === lastShareKey) return;
@@ -2727,7 +2799,7 @@ function renderShare() {
   const legacy = !state.chatMeta?.ownerId;
   $('#share-claim-wrap').classList.toggle('hidden', !legacy);
   if (legacy) {
-    for (const id of ['#vis-row', '#share-ask', '#share-requests-wrap', '#share-members-wrap', '#share-invite-wrap']) {
+    for (const id of ['#vis-row', '#comments-row', '#share-ask', '#share-requests-wrap', '#share-members-wrap', '#share-invite-wrap']) {
       $(id).classList.add('hidden');
     }
     $('#share-copy').onclick = () => copyChatLink($('#share-copy'), 'Copy chat link');
@@ -2762,6 +2834,27 @@ function renderShare() {
     }
   };
   $('#share-copy').onclick = () => copyChatLink($('#share-copy'), 'Copy chat link');
+
+  // comments switch: viewers get their own private annotation layers
+  $('#comments-row').classList.toggle('hidden', !editor);
+  const ct = $('#comments-toggle');
+  ct.checked = !!state.chatMeta?.comments;
+  ct.onchange = async () => {
+    const comments = ct.checked;
+    const res = await fetch(`/api/chats/${state.chatId}`, {
+      method: 'PATCH', headers: JSONH, body: JSON.stringify({ comments }),
+    });
+    if (res.ok) {
+      state.chatMeta.comments = comments;
+      showToast(comments
+        ? 'Comments on — share the link and anyone who can watch can leave them'
+        : 'Comments off — existing ones stay visible to you');
+      updateLayerSel();
+      setRole(state.myRole); // record button visibility can change for viewers
+    } else {
+      ct.checked = !comments;
+    }
+  };
 
   // a signed-in viewer who isn't a member yet (public chat / invite peek) can knock
   const amMember = state.members.some(mm => mm.userId === state.auth?.user?.id);
