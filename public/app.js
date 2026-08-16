@@ -43,7 +43,14 @@ const state = {
   layer: '',
 };
 
-const layerOk = m => !m.layer || m.layer === state.layer;
+// Editors flip through comment layers with the picker; everyone else just
+// sees their own comments inline, as if they're part of the conversation —
+// no layer concept surfaces for them at all.
+const layerOk = m => {
+  if (!m.layer) return true;
+  if (canEdit()) return m.layer === state.layer;
+  return m.layer === state.auth?.user?.id;
+};
 
 const inWindow = m =>
   (state.filter.t0 == null || m.createdAt >= state.filter.t0) &&
@@ -1679,7 +1686,7 @@ function updateLayerPick() {
       : e.label || state.messages.find(mm => mm.layer === id)?.author || 'Commenter';
     layerEntries.push({ id, label, n: e.n });
   }
-  const show = layerEntries.length > 1;
+  const show = canEdit() && layerEntries.length > 1; // editor tool only
   btn.classList.toggle('hidden', !show);
   if (!show) {
     $('#layer-pop').classList.add('hidden');
@@ -1732,13 +1739,11 @@ async function toggleRecord() {
   if (!canComment()) {
     const me = state.auth?.user;
     if (state.chatMeta?.comments && me && state.myRole) {
-      // viewers record into their own comment layer; flip the view there so
-      // the recording lands where they're looking
-      if (state.layer !== me.id) {
-        state.layer = me.id;
-        refreshFilter();
-        updateLayerPick();
-        showToast('Recording into your comments — only you and the editors see them');
+      // commenters just record — their clips land inline in their own view,
+      // shared with the editors. One-time heads-up, then stay out of the way.
+      if (!state._commentToast) {
+        state._commentToast = true;
+        showToast('Your clips join the conversation as comments — you and the editors see them');
       }
     } else if (state.chatMeta?.comments && !me) {
       // the moment of intent: they tried to comment — now ask them to sign in
@@ -1842,7 +1847,10 @@ async function toggleRecord() {
   $('#rec-btn').classList.add('recording');
   $('#menu-pop').classList.add('hidden'); // no device swaps mid-clip
 
-  state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume, layer: state.layer };
+  // where the clip routes: editors record into whatever layer they're
+  // viewing; members post to the base; comment-only viewers into their own
+  const recLayer = canEdit() ? state.layer : canComment() ? '' : (state.auth?.user?.id || '');
+  state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume, layer: recLayer };
   recorder.start();
   audioRecorder.start();
   screenRecorder?.start();
