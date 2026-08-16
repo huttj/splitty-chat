@@ -121,17 +121,16 @@ body {
 /* while someone else plays, your camera shrinks to a corner PiP (tap to resize) */
 #video-box.mode-play #preview,
 #video-box.mode-screenlive #preview {
-  inset: 8px 8px auto auto; width: 22%; height: auto; aspect-ratio: 3/4;
+  inset: 8px 8px auto auto; width: 22%; height: auto; /* JS refines to the camera's real aspect */
   border-radius: 10px; border: 1px solid rgba(255,255,255,0.3); z-index: 3;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.5); cursor: pointer;
-  transition: width 0.15s ease;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.5); cursor: grab;
+  touch-action: none;
 }
-#video-box.mode-play.pip-mini #preview { width: 12%; }
-#video-box.mode-screenlive.pip-mini #preview { width: 12%; }
 #video-box.mode-record { outline: 2px solid var(--rec); outline-offset: -2px; }
 /* fit toggle: contain letterboxes so faces never get cropped away */
 #video-box.fit-contain video { object-fit: contain; }
-#video-box.mode-play.fit-contain #preview { object-fit: cover; } /* corner PiP stays cover */
+#video-box.mode-play.fit-contain #preview,
+#video-box.mode-screenlive.fit-contain #preview { object-fit: cover; } /* corner PiP box already matches the video */
 #fit-btn {
   position: absolute; top: 8px; left: 8px; z-index: 4;
   background: rgba(0, 0, 0, 0.5); border: 0; color: #fff; cursor: pointer;
@@ -501,9 +500,7 @@ body.role-viewer #splitter { bottom: 0; }
 
 /* the little draggable video during screen playback (tap = swap big/small) */
 #video-box.mode-screen .spip {
-  inset: auto;
-  left: var(--spip-x, 12px); top: var(--spip-y, 12px);
-  width: 24%; max-width: 240px; min-width: 100px; height: auto; aspect-ratio: 4/3;
+  inset: auto; /* geometry comes inline from layoutPip — box matches the video's aspect */
   border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.3); z-index: 5;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5); cursor: grab; object-fit: cover;
   touch-action: none;
@@ -522,3 +519,6 @@ body.role-viewer #splitter { bottom: 0; }
 #screen-btn.screen-on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
 .screen-tag { font-size: 12px; opacity: 0.8; }
+
+/* screen toggle sits left of record; stop stays stacked above */
+#rec-row { display: flex; align-items: center; gap: 10px; }
