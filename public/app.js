@@ -45,7 +45,7 @@ const state = {
   wordLag: (v => Number.isFinite(v) ? v : 0.3)(parseFloat(localStorage.getItem('splitty:wordlag'))),
   // shoulder kept around words when clipping silences (before-word margin is
   // half of this) — tunable
-  silPad: (v => Number.isFinite(v) ? v : 0.9)(parseFloat(localStorage.getItem('splitty:silpad'))),
+  silPad: (v => Number.isFinite(v) ? v : 0.7)(parseFloat(localStorage.getItem('splitty:silpad'))),
   // minimum silence that must survive the shoulders for a pause to be trimmed
   silMin: (v => Number.isFinite(v) ? v : 0.25)(parseFloat(localStorage.getItem('splitty:silmin'))),
 };
