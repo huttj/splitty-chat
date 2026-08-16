@@ -2171,7 +2171,7 @@ async function chunkUpload(blob, onBytes) {
 }
 
 async function uploadJob(job) {
-  const { videoBlob, audioBlob, screenBlob, rec, durationMs } = job;
+  const { videoBlob, screenBlob, rec } = job;
   job.phase = 'sending';
   // finished keys are memoized on the job, so a Retry never redoes an upload
   const total = videoBlob.size + (screenBlob?.size || 0);
@@ -2184,16 +2184,27 @@ async function uploadJob(job) {
   if (!job.videoKey) job.videoKey = await chunkUpload(videoBlob, onBytes);
   if (screenBlob && screenBlob.size && !job.screenKey) job.screenKey = await chunkUpload(screenBlob, onBytes);
 
+  // file uploads extract their audio in parallel with the chunks — collect it
+  if (job.audioPromise) {
+    const a = await job.audioPromise.catch(() => null);
+    if (a && !job.audioBlob) {
+      job.audioBlob = a.blob;
+      job.durationMs ||= a.durationMs;
+    }
+    job.audioPromise = null;
+  }
+  const audioBlob = job.audioBlob;
+
   // the message itself is now a small request: keys + the ~64kbps audio track
   const fd = new FormData();
   fd.append('videoKey', job.videoKey);
   if (job.screenKey) fd.append('screenKey', job.screenKey);
   if (audioBlob && audioBlob.size) {
-    fd.append('audio', audioBlob, `audio.${audioBlob.type.includes('mp4') ? 'm4a' : 'webm'}`);
+    fd.append('audio', audioBlob, `audio.${audioBlob.type.includes('mp4') ? 'm4a' : audioBlob.type.includes('wav') ? 'wav' : 'webm'}`);
     fd.append('gain', String(await measureGain(audioBlob)));
   }
   fd.append('author', state.name || 'anon');
-  fd.append('durationMs', String(durationMs));
+  fd.append('durationMs', String(job.durationMs));
   const lang = localStorage.getItem('splitty:lang');
   if (lang) fd.append('lang', lang); // pin the transcription language
   if (rec.layer) fd.append('layer', rec.layer); // route into a comment layer
@@ -2266,38 +2277,43 @@ async function harvestAndRetranscribe(msg, btn) {
 // Post an existing video file as a message: extract its audio track in the
 // browser (for transcription + loudness), then ride the normal pipeline —
 // chunked upload, ghost card, layer routing, the works.
+// decode the audio track out of a video file → 16kHz-ish mono WAV
+async function extractAudio(file) {
+  const ctx = new OfflineAudioContext(1, 1, 16000);
+  const decoded = await ctx.decodeAudioData(await file.arrayBuffer());
+  const ch0 = decoded.getChannelData(0);
+  let mono = ch0;
+  if (decoded.numberOfChannels > 1) {
+    const ch1 = decoded.getChannelData(1);
+    mono = new Float32Array(ch0.length);
+    for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2;
+  }
+  return { blob: wavBlob(mono, decoded.sampleRate), durationMs: Math.round(decoded.duration * 1000) };
+}
+
+// fast duration read: container metadata only, no decode
+const videoDurationMs = file => new Promise(res => {
+  const v = document.createElement('video');
+  v.preload = 'metadata';
+  v.onloadedmetadata = () => {
+    const d = isFinite(v.duration) ? Math.round(v.duration * 1000) : null;
+    URL.revokeObjectURL(v.src);
+    res(d);
+  };
+  v.onerror = () => res(null);
+  v.src = URL.createObjectURL(file);
+});
+
 async function uploadVideoFile(file) {
   if (!file) return;
   if (!file.type.startsWith('video/')) return showToast("That doesn't look like a video file");
   if (file.size > 800 * 1024 * 1024) return showToast('That file is too large — try under 800MB');
-  showToast('Preparing your video…');
 
-  let audioBlob = null;
-  let durationMs = null;
-  try {
-    const ctx = new OfflineAudioContext(1, 1, 16000);
-    const decoded = await ctx.decodeAudioData(await file.arrayBuffer());
-    durationMs = Math.round(decoded.duration * 1000);
-    const ch0 = decoded.getChannelData(0);
-    let mono = ch0;
-    if (decoded.numberOfChannels > 1) {
-      const ch1 = decoded.getChannelData(1);
-      mono = new Float32Array(ch0.length);
-      for (let i = 0; i < ch0.length; i++) mono[i] = (ch0[i] + ch1[i]) / 2;
-    }
-    audioBlob = wavBlob(mono, decoded.sampleRate);
-  } catch { /* undecodable audio — upload anyway; transcript just won't exist */ }
-
-  if (durationMs == null) {
-    // duration fallback via a throwaway video element
-    durationMs = await new Promise(res => {
-      const v = document.createElement('video');
-      v.preload = 'metadata';
-      v.onloadedmetadata = () => { const d = isFinite(v.duration) ? Math.round(v.duration * 1000) : null; URL.revokeObjectURL(v.src); res(d); };
-      v.onerror = () => res(null);
-      v.src = URL.createObjectURL(file);
-    });
-  }
+  // audio decode is CPU-bound, upload is network-bound: run them in
+  // parallel. The upload starts immediately; the message POST at the end
+  // waits for whichever finishes last.
+  const audioPromise = extractAudio(file).catch(() => null);
+  const durationMs = await videoDurationMs(file); // instant — metadata only
   if (durationMs && durationMs > MAX_RECORD_MS + 30_000 && !canEdit()) {
     return showToast('Clips are capped at 10 minutes — editors can post longer videos');
   }
@@ -2305,12 +2321,20 @@ async function uploadVideoFile(file) {
   const recLayer = canEdit() ? state.layer : canComment() ? '' : (state.auth?.user?.id || '');
   const anchor = state._uploadAnchor || {};
   state._uploadAnchor = null;
-  enqueueUpload({
+  const job = {
     videoBlob: file,
-    audioBlob,
+    audioBlob: null,
+    audioPromise,
     screenBlob: null,
     durationMs,
     rec: { parentId: anchor.parentId || null, anchorMs: anchor.anchorMs ?? null, resume: null, layer: recLayer },
+  };
+  enqueueUpload(job);
+  audioPromise.then(a => {
+    if (!a) return;
+    job.audioBlob = a.blob;
+    job.durationMs ||= a.durationMs;
+    savePending(job); // the crash-recovery copy gets the audio track too
   });
   showToast(anchor.parentId ? 'Uploading — it splices in right where you were' : 'Uploading — it appears in the chat when it lands');
 }
@@ -3249,19 +3273,22 @@ function renderShare() {
   // fork: approved accounts with access can spin this conversation (plus
   // their own comments, woven in) into a chat they own
   const canFork = state.auth?.user?.status === 'approved' && !!state.chatMeta?.ownerId;
+  // owners already own it — for them it's just a copy
+  const forkLabel = state.isOwner ? 'Make a copy of this conversation' : 'Fork — make this conversation yours';
+  $('#share-fork').textContent = forkLabel;
   $('#share-fork').classList.toggle('hidden', !canFork);
   $('#share-fork-note').classList.toggle('hidden', !canFork);
   $('#share-fork').onclick = async () => {
     const btn = $('#share-fork');
     btn.disabled = true;
-    btn.textContent = 'Forking…';
+    btn.textContent = state.isOwner ? 'Copying…' : 'Forking…';
     const res = await fetch(`/api/chats/${state.chatId}/fork`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.id) {
       location.href = `/c/${data.id}`;
     } else {
       btn.disabled = false;
-      btn.textContent = 'Fork — make this conversation yours';
+      btn.textContent = forkLabel;
       showToast(data.error || "Couldn't fork this chat");
     }
   };
