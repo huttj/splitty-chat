@@ -524,10 +524,7 @@ body.role-viewer #splitter { bottom: 0; }
 #rec-row { display: flex; align-items: center; gap: 10px; }
 
 /* side-by-side screen playback: screen left, camera right, both whole */
-#video-box.screen-split #screen-player { inset: 0 50% 0 0; width: 50%; object-fit: contain; }
-#video-box.screen-split video:not(#screen-player):not(#preview):not(.hidden) {
-  inset: 0 0 0 50%; width: 50%; object-fit: contain; background: #000;
-}
+/* screen-split geometry is computed in JS (layoutSplit) — aspect-true rects */
 
 /* ---------- timeline lens (time window + depth fold) ---------- */
 #history-bar {
@@ -697,15 +694,7 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 /* video-file drop target */
 #messages.drop-hot { outline: 2px dashed var(--accent); outline-offset: -6px; background: var(--accent-soft); }
 
-/* portrait video box: split stacks screen on top, camera below.
-   Explicit heights: the base video rule's height:100% beats `bottom`, so
-   inset alone can't halve them. */
-#video-box.screen-split.split-v #screen-player:not(.spip) {
-  inset: 0 0 auto 0; width: 100%; height: 50%;
-}
-#video-box.screen-split.split-v video:not(#screen-player):not(#preview):not(.hidden) {
-  inset: auto 0 0 0; width: 100%; height: 50%;
-}
+
 
 /* one zoom level, everywhere: no double-tap zoom (scroll/scrub still work) */
 * { touch-action: manipulation; }

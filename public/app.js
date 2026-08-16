@@ -2639,14 +2639,43 @@ function pipHoverCursor(e) {
 
 function relayoutPips() {
   const box = $('#video-box');
-  if (box.classList.contains('screen-split')) {
-    box.classList.toggle('split-v', box.clientHeight > box.clientWidth);
-  }
+  if (box.classList.contains('screen-split')) layoutSplit();
   if (box.classList.contains('mode-play') || box.classList.contains('mode-screenlive')) {
     layoutPip(preview, pips.cam);
   }
   const spipEl = [...players, screenEl()].find(p => p.classList.contains('spip'));
   if (spipEl) layoutPip(spipEl, pips.spip);
+}
+
+// Split layout, computed: both videos render at their true aspect ratios,
+// sandwiched flush against each other and centered — the pair scaled to fit.
+// Portrait boxes stack top/bottom (shared width, heights by aspect); landscape
+// goes side by side (shared height, widths by aspect). A taller screen share
+// naturally takes more room than the camera — no fixed 50/50.
+function layoutSplit() {
+  const box = $('#video-box');
+  const sp = screenEl(), cam = activeEl();
+  const W = box.clientWidth, H = box.clientHeight;
+  if (!W || !H) return;
+  const ar = el => (el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : 16 / 9);
+  const a1 = ar(sp), a2 = ar(cam);
+  const setRect = (el, l, t, w, h) => Object.assign(el.style, {
+    position: 'absolute', inset: 'auto',
+    left: `${l}px`, top: `${t}px`, width: `${w}px`, height: `${h}px`,
+  });
+  if (H > W) { // portrait: stack
+    const w = Math.min(W, H / (1 / a1 + 1 / a2));
+    const h1 = w / a1, h2 = w / a2;
+    const left = (W - w) / 2, top = (H - (h1 + h2)) / 2;
+    setRect(sp, left, top, w, h1);
+    setRect(cam, left, top + h1, w, h2);
+  } else { // landscape: side by side
+    const h = Math.min(H, W / (a1 + a2));
+    const w1 = h * a1, w2 = h * a2;
+    const left = (W - (w1 + w2)) / 2, top = (H - h) / 2;
+    setRect(sp, left, top, w1, h);
+    setRect(cam, left + w1, top, w2, h);
+  }
 }
 
 function setScreenLayout(layout) {
@@ -2725,9 +2754,7 @@ function updateStage() {
   $('#self-btn').classList.toggle('hidden', !(camStream && selfIsPip));
   $('#self-btn').textContent = state.selfHide ? 'Show me' : 'Hide me';
   preview.classList.toggle('hidden', !camStream || (state.selfHide && selfIsPip));
-  // portrait boxes stack the split top/bottom instead of side by side
-  if (split) box.classList.toggle('split-v', box.clientHeight > box.clientWidth);
-  else box.classList.remove('split-v');
+  if (split) layoutSplit(); // computed rects: aspect-true, sandwiched, centered
   // never a silently empty box: show the camera-off glyph when the stage
   // would be showing your camera but there's no stream
   $('#cam-off').classList.toggle('hidden', !(mode !== 'play' && !camStream && !screenLive));
