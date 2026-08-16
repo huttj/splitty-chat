@@ -857,16 +857,30 @@ function initChat() {
     const start = { x: e.clientX, y: e.clientY };
     let active = false;
     let dead = false; // vertical intent — this drag belongs to the scroller
+    const scrubToTime = (mid, t) => {
+      const vt = vtOfMsgTime(mid, t);
+      if (vt == null) return;
+      $('#scrubber').value = vt;
+      updateTimeLabel(vt);
+      scrubFocus(vt);
+      const now = performance.now();
+      if (now - lastWordPreview > 150) {
+        lastWordPreview = now;
+        previewVirtual(vt);
+      }
+    };
     const scrubTo = (span, clientX) => {
       const msg = state.byId.get(span.dataset.mid);
       if (!msg || span.dataset.t == null) return;
-      // interpolate within the word/gap from the pointer's x, so the glow's
-      // hotspot tracks the mouse and the playhead moves inch by inch
+      // interpolate within the word/gap from the pointer's x — but the outer
+      // fifths snap to the word's exact ends, so landing a splice point
+      // cleanly before or after a word is easy
       const rect = span.getBoundingClientRect();
       const s = Number(span.dataset.t);
       const en = Number(span.dataset.e ?? span.dataset.t);
       const f = Math.min(Math.max((clientX - rect.left) / Math.max(rect.width, 1), 0), 1);
-      const vt = vtOfMsgTime(span.dataset.mid, s + f * Math.max(0, en - s) + 0.0005);
+      const t = f < 0.2 ? s : f > 0.8 ? Math.max(en - 0.001, s) : s + f * Math.max(0, en - s);
+      const vt = vtOfMsgTime(span.dataset.mid, t + 0.0005);
       if (vt == null) return;
       $('#scrubber').value = vt;
       updateTimeLabel(vt);
@@ -895,8 +909,29 @@ function initChat() {
         state.scrubResume = state.playing && !activeEl().paused;
         clearWordHighlight();
       }
-      const span = document.elementFromPoint(ev.clientX, ev.clientY)?.closest?.('.word, .gap');
-      if (span) scrubTo(span, ev.clientX);
+      const under = document.elementFromPoint(ev.clientX, ev.clientY);
+      const span = under?.closest?.('.word, .gap');
+      if (span) {
+        scrubTo(span, ev.clientX);
+        return;
+      }
+      // not over a word: the card's margins are seek targets too — above the
+      // first word lands at the very beginning (preempt), past the last word
+      // lands at the very end (splice right after the clip)
+      const card = under?.closest?.('.msg');
+      const firstWord = card?.querySelector(':scope > .msg-body > .word');
+      const mid = firstWord?.dataset.mid;
+      if (!mid) return;
+      const words = card.querySelectorAll(`:scope > .msg-body > .word[data-mid="${mid}"]`);
+      const first = words[0].getBoundingClientRect();
+      const last = words[words.length - 1].getBoundingClientRect();
+      const msg = state.byId.get(mid);
+      if (!msg) return;
+      if (ev.clientY < first.top || (ev.clientY <= first.bottom && ev.clientX < first.left)) {
+        scrubToTime(mid, 0.001);
+      } else if (ev.clientY > last.bottom || (ev.clientY >= last.top && ev.clientX > last.right)) {
+        scrubToTime(mid, Math.max(msgDur(msg) - 0.02, 0));
+      }
     };
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
@@ -3475,6 +3510,11 @@ function refreshTimelinePanel(force = false) {
       const GAP = Math.min(0.004, 0.15 / Math.max(visible.length, 1));
       const usable = 1 - GAP * (visible.length - 1);
       const totalDur = visible.reduce((a, m) => a + Math.max(msgDur(m), 1), 0);
+      // stacked: each block rides at its reply depth, so bursts of replies
+      // rise into towers — the conversation's shape, without dead space
+      const laneCount = Math.max(2, Math.min(8,
+        1 + Math.max(...visible.map(m => dm.get(m.id) || 0))));
+      const laneH = 100 / laneCount;
       let x = 0;
       for (const m of visible) {
         const w = (Math.max(msgDur(m), 1) / totalDur) * usable;
@@ -3483,6 +3523,9 @@ function refreshTimelinePanel(force = false) {
         el.className = 'mini-block';
         el.style.left = `${x * 100}%`;
         el.style.width = `${Math.max(w * 100, 0.2)}%`;
+        const lane = Math.min(dm.get(m.id) || 0, laneCount - 1);
+        el.style.bottom = `${lane * laneH}%`;
+        el.style.height = `${laneH}%`;
         el.style.background = colorFor(m.author);
         box.appendChild(el);
         x += w + GAP;
