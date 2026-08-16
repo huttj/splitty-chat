@@ -495,7 +495,7 @@ body.role-viewer #splitter { bottom: 0; }
 
 /* ---------- screen sharing ---------- */
 /* screens are letterboxed, never cropped — text must stay readable */
-#video-box #screen-player:not(.spip) { object-fit: contain !important; background: #000; z-index: 2; }
+#video-box #screen-player:not(.spip) { background: #000; z-index: 2; } /* fit/fill governed by the box's fit-contain class */
 #video-box.mode-screenlive #screen-player { z-index: 1; } /* under the corner cam preview */
 
 /* the little draggable video during screen playback (tap = swap big/small) */

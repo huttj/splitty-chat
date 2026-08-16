@@ -1064,17 +1064,17 @@ function initChat() {
     el.addEventListener('pointermove', pipHoverCursor);  // diagonal cursors over the corners
   }
 
-  // fill (crop to fit) vs fit (letterbox, whole frame visible)
-  const applyFit = () => {
-    $('#video-box').classList.toggle('fit-contain', state.fit === 'contain');
-    $('#fit-btn').textContent = state.fit === 'contain' ? 'Fill' : 'Fit'; // button shows the alternative
-  };
+  // fill (crop to fit) vs fit (letterbox, whole frame visible) — separate
+  // preferences per context: faces default to Fill, screen shares to Fit
+  // (text must stay whole). The button flips whichever you're looking at.
   state.fit = localStorage.getItem('splitty:fit') || 'cover';
-  applyFit();
+  state.fitScreen = localStorage.getItem('splitty:fitscreen') || 'contain';
   $('#fit-btn').onclick = () => {
-    state.fit = state.fit === 'cover' ? 'contain' : 'cover';
-    localStorage.setItem('splitty:fit', state.fit);
-    applyFit();
+    const onScreen = $('#video-box').classList.contains('mode-screen');
+    const key = onScreen ? 'fitScreen' : 'fit';
+    state[key] = state[key] === 'cover' ? 'contain' : 'cover';
+    localStorage.setItem(onScreen ? 'splitty:fitscreen' : 'splitty:fit', state[key]);
+    updateStage();
   };
 
   // gate: sign-in when auth is configured, name-only otherwise
@@ -2739,6 +2739,12 @@ function updateStage() {
   splitBtn.classList.toggle('hidden', !screenPlay);
   splitBtn.textContent = split ? 'PiP' : 'Split'; // button shows the alternative
   splitBtn.onclick = () => setScreenLayout(split ? 'screen' : 'split');
+  // fill/fit per context: the screen-share preference rules while a screen
+  // message plays (default Fit — text stays whole), faces keep their own
+  const fitVal = screenPlay ? state.fitScreen : state.fit;
+  box.classList.toggle('fit-contain', fitVal === 'contain');
+  $('#fit-btn').textContent = fitVal === 'contain' ? 'Fill' : 'Fit'; // shows the alternative
+
   // which video is the little draggable one (tap it to swap) — none when split
   players.forEach(p => p.classList.remove('spip'));
   sp.classList.remove('spip');
