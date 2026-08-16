@@ -455,7 +455,10 @@ function initMenu() {
 
   // spoken-word glow timing: 0 = trust Whisper's stamps, higher = glow later
   const lag = $('#lag-range'), lagLabel = $('#lag-label');
-  const paintLag = () => (lagLabel.textContent = `${Math.round(state.wordLag * 1000)}ms`);
+  const paintLag = () => {
+    const ms = Math.round(state.wordLag * 1000);
+    lagLabel.textContent = `${ms > 0 ? '+' : ''}${ms}ms`; // offset from the measured baseline
+  };
   lag.value = state.wordLag;
   paintLag();
   lag.oninput = () => {
@@ -1811,14 +1814,12 @@ function tickHighlight() {
   // through WebAudio (the compressor), whose output latency is tiny on
   // desktop but 100-500ms on mobile/Bluetooth — currentTime runs that far
   // ahead of what's actually HEARD, so compensate with the measured value.
-  // The tuned slider and the measured audio-output latency are two estimates
-  // of the SAME wall-clock delay (desktop under-reports latency, so the
-  // slider historically absorbed it) — take the larger, never the sum, or
-  // honestly-reporting devices double-count. Latency is wall-clock, so it
-  // scales by playback rate.
+  // Measured audio-output latency (rate-scaled: it's wall-clock) is the
+  // automatic baseline; the slider is a manual offset on top of it — zero
+  // means "trust the measurement", positive pushes the glow later, negative
+  // earlier. Tuned per device, which is what localStorage gives us anyway.
   const outLag = audioCtx ? (audioCtx.outputLatency || audioCtx.baseLatency || 0) : 0;
-  const comp = Math.max(state.wordLag, outLag * (el.playbackRate || 1));
-  focusWordAt(seg, el.currentTime - comp, 'speaking');
+  focusWordAt(seg, el.currentTime - outLag * (el.playbackRate || 1) - state.wordLag, 'speaking');
   tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);
