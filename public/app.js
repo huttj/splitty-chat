@@ -733,6 +733,11 @@ function initChat() {
     // one — during boundary handoffs events fire on both, in racy orders
     el.addEventListener('play', syncPlayButton);
     el.addEventListener('pause', syncPlayButton);
+    // buffering flags feed the loading spinner
+    el.addEventListener('waiting', () => { el._waiting = true; updateVidSpinner(); });
+    for (const ev of ['playing', 'canplay', 'seeked']) {
+      el.addEventListener(ev, () => { el._waiting = false; updateVidSpinner(); });
+    }
     el.addEventListener('loadedmetadata', e => {
       const v = e.target;
       if (v._pendingSeek != null) {
@@ -2063,7 +2068,17 @@ setInterval(() => {
   }
   updateHint();
   updatePendingCards();
+  updateVidSpinner();
 }, 250);
+
+// spinner over the video box while the active video has no frame to show
+// (first load) or is stalled buffering mid-play
+function updateVidSpinner() {
+  const spin = $('#vid-spin');
+  if (!state.playing || state.playIdx < 0) return spin.classList.add('hidden');
+  const el = activeEl();
+  spin.classList.toggle('hidden', !(el.readyState < 2 || el._waiting));
+}
 
 // only transient status (recording timer, upload state) — empty hides the pill.
 // Recording wins the pill; background sends show while idle.
