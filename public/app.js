@@ -45,7 +45,9 @@ const state = {
   wordLag: (v => Number.isFinite(v) ? v : 0.3)(parseFloat(localStorage.getItem('splitty:wordlag'))),
   // shoulder kept around words when clipping silences (before-word margin is
   // half of this) — tunable
-  silPad: (v => Number.isFinite(v) ? v : 0.75)(parseFloat(localStorage.getItem('splitty:silpad'))),
+  silPad: (v => Number.isFinite(v) ? v : 0.9)(parseFloat(localStorage.getItem('splitty:silpad'))),
+  // minimum silence that must survive the shoulders for a pause to be trimmed
+  silMin: (v => Number.isFinite(v) ? v : 0.25)(parseFloat(localStorage.getItem('splitty:silmin'))),
 };
 
 // Editors flip through comment layers with the picker; everyone else just
@@ -395,6 +397,7 @@ function initMenu() {
   const btn = $('#menu-btn'), pop = $('#menu-pop');
   btn.onclick = async () => {
     if (pop.classList.contains('hidden')) {
+      pop.style.top = `${btn.getBoundingClientRect().bottom + 8}px`; // anchored, not guessed
       pop.classList.remove('hidden');
       // device labels only exist once camera permission is granted — warm it
       // for people who can record here; pure viewers never get prompted
@@ -435,18 +438,32 @@ function initMenu() {
 
   // silence-trim shoulder: how much breathing room stays around words when
   // Skip pauses clips dead air (before-word margin is half of this)
+  let trimTimer = null;
+  const trimChanged = () => {
+    // splice points move — rebuild playlist/transcript, debounced for drags
+    clearTimeout(trimTimer);
+    trimTimer = setTimeout(() => { if (state.hideGaps) refreshFilter(); }, 150);
+  };
   const pad = $('#pad-range'), padLabel = $('#pad-label');
   const paintPad = () => (padLabel.textContent = `${Math.round(state.silPad * 1000)}ms`);
   pad.value = state.silPad;
   paintPad();
-  let padTimer = null;
   pad.oninput = () => {
     state.silPad = +pad.value;
     localStorage.setItem('splitty:silpad', String(state.silPad));
     paintPad();
-    // splice points move — rebuild playlist/transcript, debounced for drags
-    clearTimeout(padTimer);
-    padTimer = setTimeout(() => { if (state.hideGaps) refreshFilter(); }, 150);
+    trimChanged();
+  };
+  // how much silence must survive the shoulders before a pause is worth trimming
+  const min = $('#min-range'), minLabel = $('#min-label');
+  const paintMin = () => (minLabel.textContent = `${Math.round(state.silMin * 1000)}ms`);
+  min.value = state.silMin;
+  paintMin();
+  min.oninput = () => {
+    state.silMin = +min.value;
+    localStorage.setItem('splitty:silmin', String(state.silMin));
+    paintMin();
+    trimChanged();
   };
 }
 
@@ -1278,7 +1295,7 @@ function silencesFor(msg) {
     // clippable when ≥250ms of silence survives the shoulders, so the slider
     // trades naturally — tight padding clips more pauses, loose clips fewer.
     const s = from + state.silPad, e = to - state.silPad / 2;
-    if (e - s >= 0.25) sil.push([s, e]);
+    if (e - s >= state.silMin) sil.push([s, e]);
   };
   for (const w of msg.words) {
     consider(prev, w.s);
