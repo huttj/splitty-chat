@@ -687,3 +687,10 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 /* transcript is a scrub surface: drag moves the playhead, never selects */
 #messages { -webkit-user-select: none; user-select: none; }
 .word, .gap { touch-action: pan-y; } /* vertical scroll still works on touch */
+
+/* fresh from sign-in with record intent: light the path */
+#rec-btn.attract { border-color: var(--accent); animation: attract-pulse 1.4s infinite; }
+@keyframes attract-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(124, 92, 255, 0.55); }
+  50% { box-shadow: 0 0 0 12px rgba(124, 92, 255, 0); }
+}

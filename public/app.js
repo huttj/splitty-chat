@@ -676,10 +676,16 @@ function initChat() {
     if (!startSpan) return;
     const start = { x: e.clientX, y: e.clientY };
     let active = false;
-    const scrubTo = span => {
+    const scrubTo = (span, clientX) => {
       const msg = state.byId.get(span.dataset.mid);
       if (!msg || span.dataset.t == null) return;
-      const vt = vtOfMsgTime(span.dataset.mid, Number(span.dataset.t) + 0.001);
+      // interpolate within the word/gap from the pointer's x, so the glow's
+      // hotspot tracks the mouse and the playhead moves inch by inch
+      const rect = span.getBoundingClientRect();
+      const s = Number(span.dataset.t);
+      const en = Number(span.dataset.e ?? span.dataset.t);
+      const f = Math.min(Math.max((clientX - rect.left) / Math.max(rect.width, 1), 0), 1);
+      const vt = vtOfMsgTime(span.dataset.mid, s + f * Math.max(0, en - s) + 0.0005);
       if (vt == null) return;
       $('#scrubber').value = vt;
       updateTimeLabel(vt);
@@ -701,7 +707,7 @@ function initChat() {
         clearWordHighlight();
       }
       const span = document.elementFromPoint(ev.clientX, ev.clientY)?.closest?.('.word, .gap');
-      if (span) scrubTo(span);
+      if (span) scrubTo(span, ev.clientX);
     };
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
@@ -817,8 +823,13 @@ function initChat() {
       }
     });
     // any play/pause on either element re-derives the button from the active
-    // one — during boundary handoffs events fire on both, in racy orders
-    el.addEventListener('play', syncPlayButton);
+    // one — during boundary handoffs events fire on both, in racy orders.
+    // While recording, playback is flatly forbidden: whatever slipped through
+    // (space bar, a stray tap, a retry timer) gets paused right back.
+    el.addEventListener('play', () => {
+      if (state.rec) return el.pause();
+      syncPlayButton();
+    });
     el.addEventListener('pause', syncPlayButton);
     // buffering flags feed the loading spinner
     el.addEventListener('waiting', () => { el._waiting = true; updateVidSpinner(); });
@@ -1094,6 +1105,14 @@ function setRole(role) {
       if (canComment() && !state.name && !state.auth.user) state.openNameGate?.();
       else ensureCam().catch(armCamRetry);
     }
+    // back from the sign-in they started by tapping record: don't auto-record,
+    // but light the path — pulsing button + a hint until they tap it
+    if (sessionStorage.getItem('splitty:recintent') && state.auth?.user && canRecordHere()) {
+      sessionStorage.removeItem('splitty:recintent');
+      state.recNudge = true;
+      $('#rec-btn').classList.add('attract');
+      updateHint();
+    }
   }
 }
 
@@ -1332,6 +1351,7 @@ const safePlay = el => el.play()?.catch(() => {
 });
 
 function playSegment(idx, offset, autoplay = true) {
+  if (state.rec) autoplay = false; // seeks are fine mid-recording; playing is not
   const seg = state.playlist[idx];
   const msg = state.byId.get(seg.id);
   if (!msg) return stopPlayback();
@@ -1477,7 +1497,7 @@ function stopPlayback() {
 }
 
 function togglePause() {
-  if (!state.playing) return;
+  if (!state.playing || state.rec) return; // never un-pause under a recording
   const el = activeEl();
   el.paused ? el.play() : el.pause();
 }
@@ -1798,7 +1818,9 @@ async function toggleRecord() {
         showToast('Your clips join the conversation as comments — you and the editors see them');
       }
     } else if (state.chatMeta?.comments && !me) {
-      // the moment of intent: they tried to comment — now ask them to sign in
+      // the moment of intent: they tried to comment — ask them to sign in and
+      // remember why, so landing back doesn't feel like a dead end
+      sessionStorage.setItem('splitty:recintent', '1');
       wireAuthBox(location.pathname);
       $('#name-gate').classList.remove('hidden');
       return;
@@ -1897,6 +1919,8 @@ async function toggleRecord() {
   if (screenRecorder) screenRecorder.onstop = onStop;
 
   $('#rec-btn').classList.add('recording');
+  $('#rec-btn').classList.remove('attract');
+  state.recNudge = false; // the nudge did its job
   $('#menu-pop').classList.add('hidden'); // no device swaps mid-clip
 
   // where the clip routes: editors record into whatever layer they're
@@ -2200,6 +2224,7 @@ function updateHint(text) {
     const left = MAX_RECORD_MS - elapsed;
     if (left < 60_000) text += ` · ${Math.max(Math.ceil(left / 1000), 0)}s left`;
   }
+  if (text == null && state.recNudge) text = "You're in — tap ● to record";
   if (text == null && uploader.jobs.length) {
     const pct = uploader.progress != null ? ` ${uploader.progress}%` : '';
     text = uploader.jobs.length > 1 ? `Sending ${uploader.jobs.length} clips…${pct}` : `Sending…${pct}`;
@@ -2614,7 +2639,8 @@ function renderMessage(msg, depth, unlocked = false) {
     g.className = 'gap';
     g.dataset.mid = msg.id;
     g.dataset.gi = gi;
-    g.dataset.t = prevEnd; // scrub target, same shape as words
+    g.dataset.t = prevEnd;   // scrub range, same shape as words
+    g.dataset.e = nextStart;
     g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
     g.title = `${gapSec.toFixed(1)}s pause`;
     g.onclick = () => seekTranscript(msg.id, prevEnd + 0.01);
@@ -2635,6 +2661,7 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.mid = msg.id;
       span.dataset.i = wi;
       span.dataset.t = w.s;
+      span.dataset.e = w.e;
       span.textContent = w.w;
       span.onclick = () => seekTranscript(msg.id, w.s + 0.001);
       span.ondblclick = () => playFrom(msg.id, w.s + 0.001);
