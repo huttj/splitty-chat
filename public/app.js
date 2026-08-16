@@ -629,6 +629,12 @@ function initChat() {
   initMenu();
   initTimeline();
   restorePendingUploads();
+  // double-click means "play from here", not "select this word" — but plain
+  // click-and-drag selection (copying transcript text) still works
+  $('#messages').addEventListener('mousedown', e => {
+    if (e.detail > 1) e.preventDefault();
+  });
+
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;

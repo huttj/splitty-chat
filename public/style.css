@@ -660,3 +660,10 @@ body.role-viewer #screen-btn { display: none; }
   border: 3px solid rgba(255, 255, 255, 0.15); border-top-color: var(--accent);
   animation: pspin 0.8s linear infinite;
 }
+
+/* control chrome is never text-selectable (dblclick plays, buttons are buttons) */
+button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
+#vis-row, #comments-row, .share-row, #transport-row, #rec-hint, #pip-label {
+  -webkit-user-select: none;
+  user-select: none;
+}
