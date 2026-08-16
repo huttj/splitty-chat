@@ -217,8 +217,14 @@ function prefetchUnheard() {
 // ---------- audio normalization ----------
 // Playback runs through a shared compressor (levels within-clip swings), and each
 // message carries a client-measured gain (levels quiet vs loud speakers).
+// The whole chain is optional: WebAudio adds output latency and mobile
+// glitches, so phones default to raw, direct element audio.
+const IS_MOBILE = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+const storedComp = localStorage.getItem('splitty:compressor');
+let compressorOn = storedComp === null ? !IS_MOBILE : storedComp === '1';
 let audioCtx = null, compressorIn = null;
 function audioChainFor(el) {
+  if (!compressorOn) return null; // direct path: no latency, no leveling
   try {
     if (!audioCtx) {
       // 'playback' = bigger buffers: mobile underruns (dropouts that sound
@@ -452,6 +458,20 @@ function initMenu() {
   // transcription language: applies to new clips and to the ↻ retranscribe button
   $('#lang-sel').value = localStorage.getItem('splitty:lang') || '';
   $('#lang-sel').onchange = () => localStorage.setItem('splitty:lang', $('#lang-sel').value);
+
+  // loudness leveling: flipping it after audio has been wired into WebAudio
+  // needs a reload (elements can't be unwired), so reload when necessary
+  const comp = $('#comp-check');
+  comp.checked = compressorOn;
+  comp.onchange = () => {
+    localStorage.setItem('splitty:compressor', comp.checked ? '1' : '0');
+    if (audioCtx) {
+      showToast('Reloading to apply…');
+      setTimeout(() => location.reload(), 600);
+    } else {
+      compressorOn = comp.checked; // nothing wired yet — applies right away
+    }
+  };
 
   // spoken-word glow timing: 0 = trust Whisper's stamps, higher = glow later
   const lag = $('#lag-range'), lagLabel = $('#lag-label');
