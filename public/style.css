@@ -555,3 +555,52 @@ body.role-viewer #splitter { bottom: 0; }
   background: var(--bg); color: var(--text); border: 1px solid #2e3342;
   border-radius: 8px; padding: 7px 8px; font-size: 13px; max-width: 260px;
 }
+
+/* ---------- timeline lens (time window + depth fold) ---------- */
+#history-bar {
+  position: fixed; top: 56px; left: 50%; transform: translateX(-50%); z-index: 79;
+  width: min(720px, calc(100vw - 24px));
+  background: var(--panel-2); border: 1px solid #2e3342; border-radius: 14px;
+  padding: 10px 14px 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
+}
+#lens-btn.lens-open { color: var(--accent); }
+#hist-bars { display: flex; align-items: flex-end; gap: 1px; height: 36px; padding: 0 7.5px; }
+.hist-bar { flex: 1; background: var(--accent); opacity: 0.35; border-radius: 2px 2px 0 0; }
+
+/* dual-ended window slider (ported from moots): two native ranges with
+   pointer-events off — the .dual wrapper handles all interaction */
+.dual { position: relative; height: 26px; touch-action: none; cursor: pointer; }
+.dual-track { position: absolute; top: 11px; left: 0; right: 0; height: 4px; border-radius: 2px; background: #2a2e3a; }
+.dual-fill { position: absolute; top: 11px; height: 4px; border-radius: 2px; background: var(--accent); z-index: 1; outline: none; }
+.dual-fill:focus { box-shadow: 0 0 0 3px var(--accent-soft); }
+.dual input[type=range] {
+  position: absolute; top: 0; left: 0; width: 100%; height: 26px; margin: 0;
+  background: none; -webkit-appearance: none; appearance: none;
+  pointer-events: none; z-index: 2;
+}
+.dual input[type=range]::-webkit-slider-runnable-track { background: none; height: 26px; }
+.dual input[type=range]::-webkit-slider-thumb {
+  pointer-events: none; -webkit-appearance: none; appearance: none;
+  width: 15px; height: 15px; margin-top: 5.5px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff;
+}
+.dual input[type=range]::-moz-range-track { background: none; }
+.dual input[type=range]::-moz-range-thumb {
+  pointer-events: none; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff;
+}
+#lens-meta { display: flex; align-items: center; gap: 12px; font-size: 12.5px; margin-top: 2px; }
+#lens-meta .spacer { flex: 1; }
+#depth-row { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+#depth-row input { width: 120px; accent-color: var(--accent); }
+#depth-row b { min-width: 28px; color: var(--text); font-variant-numeric: tabular-nums; }
+#lens-reset { padding: 2px 10px; font-size: 12.5px; }
+
+/* folded subtree: a chip at the anchor word — tap to open the thread */
+.fold-chip {
+  display: inline-block; margin: 2px 6px 2px 2px; padding: 2px 10px;
+  background: var(--panel-2); border: 1px solid var(--chip-color, var(--accent));
+  color: var(--chip-color, var(--accent)); border-radius: 99px; cursor: pointer;
+  font: inherit; font-size: 12.5px; line-height: 1.5; vertical-align: middle;
+}
+.fold-chip:hover { background: var(--accent-soft); }

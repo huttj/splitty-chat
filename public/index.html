@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=50">
+  <link rel="stylesheet" href="/style.css?v=51">
 </head>
 <body>
 
@@ -24,12 +24,32 @@
     <header id="chat-header">
       <a href="/" class="logo">splitty</a>
       <div class="header-actions">
+        <button id="lens-btn" class="btn-ghost" title="Slice the conversation by time and reply depth">Timeline</button>
         <button id="gaps-btn" class="btn-ghost" title="Show or hide pauses in transcripts">Hide pauses</button>
         <button id="bell-btn" class="btn-ghost hidden" title="Notifications"></button>
         <button id="name-btn" class="btn-ghost" title="Change your display name"></button>
         <button id="share-btn" class="btn-ghost">Share</button>
       </div>
     </header>
+
+    <div id="history-bar" class="hidden">
+      <div id="hist-bars"></div>
+      <div class="dual" id="time-dual">
+        <div class="dual-track"></div>
+        <input type="range" id="t-min" min="0" max="1000" step="1" value="0">
+        <div class="dual-fill" id="time-fill" tabindex="0" title="Time window — drag to slide, arrows to nudge"></div>
+        <input type="range" id="t-max" min="0" max="1000" step="1" value="1000">
+      </div>
+      <div id="lens-meta">
+        <span id="win-label" class="muted">All time</span>
+        <span class="spacer"></span>
+        <label id="depth-row">Depth
+          <input type="range" id="depth-range" min="0" max="1" step="1" value="1">
+          <b id="depth-label">All</b>
+        </label>
+        <button id="lens-reset" class="btn-ghost">Reset</button>
+      </div>
+    </div>
 
     <div id="push-banner" class="hidden">
       <span>🔔 Get a ping when someone replies — in any of your chats</span>
@@ -230,6 +250,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=50"></script>
+  <script src="/app.js?v=51"></script>
 </body>
 </html>

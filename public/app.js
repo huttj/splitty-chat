@@ -35,7 +35,14 @@ const state = {
   // screen-share playback layout: 'screen' (screen big, cam floats),
   // 'cam' (swapped), or 'split' (side by side in the main box)
   screenLayout: localStorage.getItem('splitty:screenlayout') || 'screen',
+  // view lens: time window over message creation + reply-depth fold level.
+  // expanded = per-subtree overrides (fold chips that were clicked open).
+  filter: { t0: null, t1: null, depth: Infinity, expanded: new Set() },
 };
+
+const inWindow = m =>
+  (state.filter.t0 == null || m.createdAt >= state.filter.t0) &&
+  (state.filter.t1 == null || m.createdAt <= state.filter.t1);
 
 let lastPipSwap = 0; // suppress the click that trails a PiP swap tap
 
@@ -604,6 +611,7 @@ function initChat() {
   });
   initPush();
   initDevicePicker();
+  initTimeline();
   restorePendingUploads();
   $('#rec-btn').onclick = toggleRecord;
   $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
@@ -915,6 +923,7 @@ async function poll() {
     state.requests = data.requests || [];
     if (data.myRole !== undefined) setRole(data.myRole);
     render();
+    refreshTimelinePanel();
     if (!$('#share-gate').classList.contains('hidden')) renderShare();
     if (!state.cued && state.messages.length && !state.playing && !state.rec) {
       state.cued = true;
@@ -1029,9 +1038,28 @@ function syncPlayButton() {
 }
 
 // ---------- message tree ----------
-const roots = () => state.messages.filter(m => !m.parentId).sort((a, b) => a.createdAt - b.createdAt);
+// roots/children respect the time window; depth is positional and handled by
+// the callers (segmentsFor / renderMessage), so playback and transcript can
+// never disagree about what's visible
+const roots = () => state.messages.filter(m => !m.parentId && inWindow(m)).sort((a, b) => a.createdAt - b.createdAt);
 const childrenOf = id =>
-  state.messages.filter(m => m.parentId === id).sort((a, b) => (a.anchorMs - b.anchorMs) || (a.createdAt - b.createdAt));
+  state.messages.filter(m => m.parentId === id && inWindow(m))
+    .sort((a, b) => (a.anchorMs - b.anchorMs) || (a.createdAt - b.createdAt));
+
+// is this child visible at the current fold level? `unlocked` = an ancestor's
+// fold chip was opened, which reveals its whole subtree
+const kidVisible = (kid, depth, unlocked) =>
+  unlocked || depth + 1 <= state.filter.depth || state.filter.expanded.has(kid.id);
+
+function subtreeStats(msg) {
+  let n = 1, dur = msgDur(msg);
+  for (const k of childrenOf(msg.id)) {
+    const s = subtreeStats(k);
+    n += s.n;
+    dur += s.dur;
+  }
+  return { n, dur };
+}
 
 function msgDur(msg) {
   // wall-clock durationMs can undercount the real file (recorder start skew),
@@ -1090,15 +1118,17 @@ function emitChunks(msg, start, end, segs) {
   if (end > cur + 0.01) segs.push({ id: msg.id, start: cur, end });
 }
 
-// Expand a message into playable segments, interleaving interjections at their anchors.
-function segmentsFor(msg) {
+// Expand a message into playable segments, interleaving interjections at their
+// anchors. Folded subtrees (past the depth level, not chip-expanded) don't play.
+function segmentsFor(msg, depth = 0, unlocked = false) {
   const dur = msgDur(msg);
   const segs = [];
   let cursor = 0;
   for (const kid of childrenOf(msg.id)) {
+    if (!kidVisible(kid, depth, unlocked)) continue;
     const t = Math.min(snapAnchor(msg, (kid.anchorMs || 0) / 1000), dur);
     emitChunks(msg, cursor, t, segs);
-    segs.push(...segmentsFor(kid));
+    segs.push(...segmentsFor(kid, depth + 1, unlocked || state.filter.expanded.has(kid.id)));
     cursor = Math.max(cursor, t);
   }
   emitChunks(msg, cursor, Math.max(dur, cursor), segs);
@@ -1538,13 +1568,24 @@ function remapPlayback() {
   if (!msgId) return;
   let idx = state.playlist.findIndex(s => s.id === msgId && t >= s.start - 0.001 && t < s.end);
   if (idx === -1) idx = state.playlist.findLastIndex(s => s.id === msgId);
+  if (idx === -1) return stopPlayback(); // what we were playing got filtered out of view
   state.playIdx = idx;
-  if (idx >= 0) prepareNext(idx);
+  prepareNext(idx);
+}
+
+// view lens changed (time window, depth, or a fold chip) — rebuild everything
+function refreshFilter() {
+  state.lastRenderKey = '';
+  if (state.playing) remapPlayback();
+  else buildPlaylist();
+  render();
 }
 
 // ---------- recording ----------
 const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced
-const SCREEN_BITRATE = 1_200_000; // 1080p10 screen content compresses fine at this
+// screens carry text (bits matter), faces don't — weight the budget that way
+const SCREEN_BITRATE = 1_500_000;
+const CAM_BITRATE = 1_100_000;
 
 async function toggleRecord() {
   if (state.rec) return stopRecord();
@@ -1582,7 +1623,7 @@ async function toggleRecord() {
   // capped bitrate keeps uploads fast
   const recorder = new MediaRecorder(stream, {
     ...(videoMime && { mimeType: videoMime }),
-    videoBitsPerSecond: 1_500_000,
+    videoBitsPerSecond: CAM_BITRATE,
   });
   const audioRecorder = new MediaRecorder(
     new MediaStream(stream.getAudioTracks()),
@@ -2141,7 +2182,7 @@ function render() {
   prefetchUnheard();
 }
 
-function renderMessage(msg, depth) {
+function renderMessage(msg, depth, unlocked = false) {
   const seenMs = state.seen[msg.id] || 0;
   const mine = isMine(msg.author);
   const isNew = !mine && (msg.words.length ? msg.words.some(w => w.s * 1000 > seenMs) : seenMs === 0);
@@ -2233,7 +2274,22 @@ function renderMessage(msg, depth) {
 
   for (const kid of kids) {
     body.appendChild(flushWordsUntil((kid.anchorMs || 0) / 1000));
-    body.appendChild(renderMessage(kid, depth + 1));
+    if (kidVisible(kid, depth, unlocked)) {
+      body.appendChild(renderMessage(kid, depth + 1, unlocked || state.filter.expanded.has(kid.id)));
+    } else {
+      // folded: the subtree collapses to a chip at its anchor — tap to open it
+      const s = subtreeStats(kid);
+      const chip = document.createElement('button');
+      chip.className = 'fold-chip';
+      chip.style.setProperty('--chip-color', colorFor(kid.author));
+      chip.textContent = `▸ ${kid.author} · ${s.n === 1 ? '1 clip' : `${s.n} clips`} · ${fmtClock(s.dur)}`;
+      chip.title = 'Show this thread';
+      chip.onclick = () => {
+        state.filter.expanded.add(kid.id);
+        refreshFilter();
+      };
+      body.appendChild(chip);
+    }
   }
   body.appendChild(flushWordsUntil(null));
 
@@ -2254,6 +2310,171 @@ const fmtTime = ts => {
   return (today ? '' : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) + ' ') +
     d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
 };
+
+// ---------- timeline lens (time window + reply-depth fold) ----------
+// A dual-ended window over message creation time (with a histogram of when
+// people talked), plus a fold-level slider for reply depth. Both feed the
+// same visibility rules that build the transcript and the playlist.
+let histBounds = null; // { min, max } createdAt across the whole chat
+let histCount = -1;
+
+function initTimeline() {
+  const bar = $('#history-bar');
+  const tMinEl = $('#t-min'), tMaxEl = $('#t-max'), tFill = $('#time-fill');
+  const dual = $('#time-dual');
+  const dr = $('#depth-range');
+
+  $('#lens-btn').onclick = () => {
+    const hidden = bar.classList.toggle('hidden');
+    $('#lens-btn').classList.toggle('lens-open', !hidden);
+    if (!hidden) refreshTimelinePanel(true);
+  };
+
+  // rebuilding transcript + playlist every input event janks on long chats
+  let queued = false;
+  const throttledRefresh = () => {
+    if (queued) return;
+    queued = true;
+    setTimeout(() => { queued = false; refreshFilter(); }, 120);
+  };
+
+  // thumbs travel an inset track ([tw/2, 100% - tw/2]) — the fill bar must
+  // live in the same coordinate space or it pokes past the dots at the ends
+  const fillCss = (a, b) => {
+    tFill.style.left = `calc(7.5px + (100% - 15px) * ${a / 1000})`;
+    tFill.style.width = `calc((100% - 15px) * ${Math.max(0, b - a) / 1000})`;
+  };
+  const fmtT = ms => new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+
+  function applyTime() {
+    const a = +tMinEl.value, b = +tMaxEl.value;
+    fillCss(a, b);
+    if (!histBounds || (a <= 0 && b >= 1000)) {
+      state.filter.t0 = state.filter.t1 = null;
+      $('#win-label').textContent = 'All time';
+    } else {
+      const span = histBounds.max - histBounds.min || 1;
+      state.filter.t0 = histBounds.min + span * (a / 1000);
+      state.filter.t1 = histBounds.min + span * (b / 1000);
+      $('#win-label').textContent = `${fmtT(state.filter.t0)} – ${fmtT(state.filter.t1)}`;
+    }
+    throttledRefresh();
+  }
+  state._applyTime = applyTime;
+
+  tMinEl.oninput = () => { if (+tMinEl.value > +tMaxEl.value) tMinEl.value = tMaxEl.value; applyTime(); };
+  tMaxEl.oninput = () => { if (+tMaxEl.value < +tMinEl.value) tMaxEl.value = tMinEl.value; applyTime(); };
+
+  // pointer feel (ported from moots): near a thumb grabs that handle, inside
+  // the window drags the whole window, outside jumps the nearest handle
+  dual.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const r = dual.getBoundingClientRect();
+    const TW = 15;
+    const val = ev => Math.round(Math.min(1, Math.max(0, (ev.clientX - r.left - TW / 2) / (r.width - TW))) * 1000);
+    const xOf = v => r.left + TW / 2 + (v / 1000) * (r.width - TW);
+    const v0 = val(e), a0 = +tMinEl.value, b0 = +tMaxEl.value;
+    const GRAB = 9;
+    const nearA = Math.abs(e.clientX - xOf(a0)) <= GRAB, nearB = Math.abs(e.clientX - xOf(b0)) <= GRAB;
+    const inside = v0 > a0 && v0 < b0;
+    const mode = nearA && nearB ? 'pan' : nearA ? 'a' : nearB ? 'b' : inside ? 'pan' : v0 < a0 ? 'a' : 'b';
+    if (mode === 'pan') tFill.focus({ preventScroll: true });
+    const move = ev => {
+      const nv = val(ev);
+      if (mode === 'pan') {
+        const dv = Math.max(-a0, Math.min(1000 - b0, nv - v0));
+        tMinEl.value = a0 + dv;
+        tMaxEl.value = b0 + dv;
+      } else if (mode === 'a') {
+        tMinEl.value = Math.min(nv, +tMaxEl.value);
+      } else {
+        tMaxEl.value = Math.max(nv, +tMinEl.value);
+      }
+      applyTime();
+    };
+    dual.setPointerCapture(e.pointerId);
+    if (mode !== 'pan') move(e); // handles jump to the pointer; panning starts in place
+    dual.addEventListener('pointermove', move);
+    const up = () => dual.removeEventListener('pointermove', move);
+    dual.addEventListener('pointerup', up, { once: true });
+    dual.addEventListener('pointercancel', up, { once: true });
+  });
+
+  // once the fill bar is focused, arrows slide the whole window
+  tFill.addEventListener('keydown', e => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const step = (e.shiftKey ? 50 : 10) * (e.key === 'ArrowLeft' ? -1 : 1);
+    const a = +tMinEl.value, b = +tMaxEl.value;
+    const dv = Math.max(-a, Math.min(1000 - b, step));
+    tMinEl.value = a + dv;
+    tMaxEl.value = b + dv;
+    applyTime();
+  });
+
+  function applyDepth() {
+    const max = +dr.max, v = +dr.value;
+    state.filter.depth = v >= max ? Infinity : v;
+    state.filter.expanded.clear(); // moving the slider resets chip overrides
+    $('#depth-label').textContent = v >= max ? 'All' : v === 0 ? 'Roots' : String(v);
+    throttledRefresh();
+  }
+  dr.oninput = applyDepth;
+
+  $('#lens-reset').onclick = () => {
+    tMinEl.value = 0;
+    tMaxEl.value = 1000;
+    dr.value = dr.max;
+    state.filter.expanded.clear();
+    applyTime();
+    applyDepth();
+  };
+}
+
+function maxTreeDepth() {
+  const memo = new Map();
+  const d = m => {
+    if (!m.parentId) return 0;
+    if (memo.has(m.id)) return memo.get(m.id);
+    const p = state.byId.get(m.parentId);
+    const v = p ? d(p) + 1 : 0;
+    memo.set(m.id, v);
+    return v;
+  };
+  return state.messages.length ? Math.max(...state.messages.map(d)) : 0;
+}
+
+// histogram + slider bounds follow the data; runs on open and on new messages
+function refreshTimelinePanel(force = false) {
+  if ($('#history-bar').classList.contains('hidden')) return;
+  if (!force && histCount === state.messages.length) return;
+  histCount = state.messages.length;
+  const ts = state.messages.map(m => m.createdAt);
+  histBounds = ts.length ? { min: Math.min(...ts), max: Math.max(...ts) } : null;
+
+  const box = $('#hist-bars');
+  box.innerHTML = '';
+  if (histBounds && ts.length > 1) {
+    const N = 48, span = histBounds.max - histBounds.min || 1;
+    const counts = new Array(N).fill(0);
+    for (const t of ts) counts[Math.min(N - 1, Math.floor(((t - histBounds.min) / span) * N))]++;
+    const peak = Math.max(...counts);
+    for (const c of counts) {
+      const b = document.createElement('div');
+      b.className = 'hist-bar';
+      b.style.height = c ? `${Math.max(8, (c / peak) * 100)}%` : '0';
+      box.appendChild(b);
+    }
+  }
+
+  const dr = $('#depth-range');
+  const max = Math.max(1, maxTreeDepth());
+  const wasAll = +dr.value >= +dr.max;
+  dr.max = max;
+  if (wasAll) dr.value = max;
+  $('#depth-label').textContent = +dr.value >= max ? 'All' : +dr.value === 0 ? 'Roots' : dr.value;
+  state._applyTime?.();
+}
 
 // ---------- share panel ----------
 const JSONH = { 'Content-Type': 'application/json' };
