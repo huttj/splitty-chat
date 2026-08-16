@@ -260,9 +260,28 @@ function audioChainFor(el) {
   }
 }
 
+// Speaker leveling is cheap and always on: when the WebAudio chain is off,
+// use the element's native volume — it can't boost, so gains normalize
+// against the chat's quietest speaker (who plays at full volume) and louder
+// speakers attenuate toward them. Zero latency, no WebAudio needed.
+let _maxGain = { n: -1, v: 1 };
+function chatGainNorm() {
+  if (_maxGain.n !== state.messages.length) {
+    let mx = 1;
+    for (const m of state.messages) mx = Math.max(mx, m.gain || 1);
+    _maxGain = { n: state.messages.length, v: Math.min(mx, 2.5) }; // cap: one extreme outlier mustn't mute the room
+  }
+  return _maxGain.v;
+}
+
 function setMsgGain(el, msg) {
   const node = audioChainFor(el);
-  if (node) node.gain.value = msg?.gain || 1;
+  if (node) {
+    node.gain.value = msg?.gain || 1; // full boost/cut through the chain
+    el.volume = 1;
+  } else {
+    el.volume = Math.min(1, Math.max(0.05, (msg?.gain || 1) / chatGainNorm()));
+  }
 }
 
 // average RMS of the non-silent blocks, mapped to a bounded correction gain
