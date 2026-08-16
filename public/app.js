@@ -1967,7 +1967,7 @@ function focusWordAt(seg, t, cls) {
     // there's always upcoming text visible below it.
     if (cls !== 'speaking') {
       span.scrollIntoView({ block: 'nearest' });
-    } else if (highlightOnScreen(span)) {
+    } else if (!touchHeld && highlightOnScreen(span)) {
       const b = $('#messages').getBoundingClientRect();
       const r = span.getBoundingClientRect();
       if (r.bottom > b.top + b.height * 0.7 || r.top < b.top) {
@@ -1977,6 +1977,20 @@ function focusWordAt(seg, t, cls) {
     lastFocus = { key, span };
   }
   span.style.setProperty('--f', `${(f * 100).toFixed(1)}%`);
+}
+
+// While a finger is on the transcript, auto-follow keeps its hands off —
+// scrolling must never be a tug-of-war. Touch events, not pointer events:
+// pointercancel fires the moment native scrolling takes over, which is
+// exactly when we still need to know the finger is down.
+let touchHeld = false;
+document.addEventListener('touchstart', e => {
+  if (e.target?.closest?.('#messages')) touchHeld = true;
+}, { passive: true, capture: true });
+for (const ev of ['touchend', 'touchcancel']) {
+  document.addEventListener(ev, e => {
+    if (e.touches.length === 0) touchHeld = false;
+  }, { passive: true, capture: true });
 }
 
 // Is the spoken-word highlight inside the transcript viewport? A couple of
