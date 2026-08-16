@@ -582,12 +582,13 @@ body.role-viewer #splitter { bottom: 0; }
 }
 @keyframes pspin { to { transform: rotate(360deg); } }
 
-.retr-btn {
+.retr-btn, .copy-btn {
   background: none; border: 0; color: var(--muted); cursor: pointer;
   font-size: 14px; padding: 0 4px; line-height: 1;
 }
-.retr-btn:hover { color: var(--accent); }
+.retr-btn:hover, .copy-btn:hover { color: var(--accent); }
 .retr-btn:disabled { opacity: 0.4; cursor: default; }
+.copy-btn { font-size: 13px; }
 
 /* comment layers */
 #layer-pick { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

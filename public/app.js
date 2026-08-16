@@ -494,6 +494,12 @@ function initMenu() {
     uploadVideoFile(f);
   };
 
+  $('#copy-tx-btn').onclick = async () => {
+    await navigator.clipboard.writeText(transcriptText());
+    pop.classList.add('hidden');
+    showToast('Transcript copied — attributed and in playback order');
+  };
+
   // transcription language: applies to new clips and to the ↻ retranscribe button
   $('#lang-sel').value = localStorage.getItem('splitty:lang') || '';
   $('#lang-sel').onchange = () => localStorage.setItem('splitty:lang', $('#lang-sel').value);
@@ -2236,6 +2242,43 @@ function renderLayerList() {
   }
 }
 
+// The whole conversation as text, interleaved exactly as it plays: walk the
+// playlist (which already encodes splices, filters, and layers), group
+// consecutive segments per message, stamp each block with its position on
+// the conversation clock, indent by reply depth.
+function transcriptText() {
+  if (!state.playlist.length) buildPlaylist();
+  const dm = depthMap();
+  const blocks = [];
+  const segs = state.playlist;
+  for (let i = 0; i < segs.length;) {
+    const id = segs[i].id;
+    const startV = segs[i].vStart;
+    let j = i;
+    while (j + 1 < segs.length && segs[j + 1].id === id) j++;
+    const msg = state.byId.get(id);
+    if (msg) {
+      const words = [];
+      for (let k = i; k <= j; k++) {
+        for (const w of msg.words) {
+          if (w.s >= segs[k].start - 0.001 && w.s < segs[k].end) words.push(w.w);
+        }
+      }
+      const cont = blocks.some(b => b.id === id);
+      if (words.length || !cont) {
+        const indent = '  '.repeat(Math.min(dm.get(id) || 0, 6));
+        blocks.push({
+          id,
+          text: `${indent}[${fmtClock(startV)}] ${msg.author}${cont ? ' (cont.)' : ''}:\n`
+            + `${indent}${words.join(' ') || '(no transcript)'}`,
+        });
+      }
+    }
+    i = j + 1;
+  }
+  return blocks.map(b => b.text).join('\n\n');
+}
+
 // view lens changed (time window, depth, layer, or a fold chip) — rebuild everything
 function refreshFilter() {
   state.lastRenderKey = '';
@@ -3239,6 +3282,7 @@ function renderMessage(msg, depth, unlocked = false) {
     ${isNew ? '<span class="badge">new</span>' : ''}
     <span class="spacer"></span>
     ${(mine || canEdit()) && depth > 0 ? '<span class="drag-handle" title="Drag onto a word to move where this interjects">⠿</span>' : ''}
+    ${msg.words.length || msg.text ? '<button class="copy-btn" title="Copy this message’s transcript">⧉</button>' : ''}
     ${(mine || canEdit()) && msg.transcriptStatus !== 'pending' ? '<button class="retr-btn" title="Transcribe again (uses your language setting)">↻</button>' : ''}
     ${mine || canEdit() ? '<button class="del-btn" title="Delete this message">✕</button>' : ''}`;
   const authorEl = head.querySelector('.author');
@@ -3247,6 +3291,11 @@ function renderMessage(msg, depth, unlocked = false) {
   head.querySelector('.play-btn').onclick = () => playFrom(msg.id, 0);
   const handle = head.querySelector('.drag-handle');
   if (handle) handle.addEventListener('pointerdown', e => startAnchorDrag(e, msg));
+  const copyBtn = head.querySelector('.copy-btn');
+  if (copyBtn) copyBtn.onclick = async () => {
+    await navigator.clipboard.writeText(msg.text || msg.words.map(w => w.w).join(' '));
+    showToast('Copied');
+  };
   const retrBtn = head.querySelector('.retr-btn');
   if (retrBtn) retrBtn.onclick = async () => {
     retrBtn.disabled = true;
