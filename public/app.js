@@ -683,14 +683,13 @@ function initChat() {
   const applyGaps = () => {
     state.hideGaps = localStorage.getItem('splitty:hidegaps') === '1';
     document.body.classList.toggle('hide-gaps', state.hideGaps);
-    $('#gaps-btn').textContent = state.hideGaps ? 'Show pauses' : 'Skip pauses';
+    $('#gaps-check').checked = state.hideGaps;
     if (state.playing) remapPlayback();
     else buildPlaylist();
   };
   applyGaps();
-  $('#gaps-btn').onclick = () => {
-    localStorage.setItem('splitty:hidegaps',
-      localStorage.getItem('splitty:hidegaps') === '1' ? '' : '1');
+  $('#gaps-check').onchange = () => {
+    localStorage.setItem('splitty:hidegaps', $('#gaps-check').checked ? '1' : '');
     applyGaps();
   };
 
@@ -933,9 +932,10 @@ function initChat() {
     $('#name-gate').classList.remove('hidden');
     if (!gateAuthMode) $('#name-input').focus();
   };
-  $('#name-btn').textContent = state.name || 'Set name';
+  $('#name-btn').textContent = state.auth?.user
+    ? `Sign out (${state.name})` // say what tapping it does
+    : state.name || 'Set name';
   if (state.auth?.user) {
-    // signed in: the header name button signs you out instead of renaming
     $('#name-btn').title = 'Sign out';
     $('#name-btn').onclick = () => {
       if (confirm(`Signed in as ${state.name}. Sign out?`)) {
@@ -2270,6 +2270,7 @@ function updateStage() {
     players.forEach(p => p.classList.add('hidden'));
     $('#transport').classList.add('hidden');
     $('#pip-label').textContent = '';
+    $('#cam-off').classList.remove('hidden'); // blocked camera: glyph behind the enable button
     return;
   }
   stage.classList.remove('hidden');
@@ -2313,6 +2314,9 @@ function updateStage() {
   }
 
   preview.classList.toggle('hidden', !camStream);
+  // never a silently empty box: show the camera-off glyph when the stage
+  // would be showing your camera but there's no stream
+  $('#cam-off').classList.toggle('hidden', !(mode !== 'play' && !camStream && !screenLive));
   activeEl().classList.toggle('hidden', mode !== 'play');
   standbyEl().classList.add('hidden');
   $('#transport').classList.toggle('hidden', mode !== 'play');
@@ -2784,32 +2788,43 @@ function refreshTimelinePanel(force = false) {
   const ts = state.messages.map(m => m.createdAt);
   histBounds = ts.length ? { min: Math.min(...ts), max: Math.max(...ts) } : null;
 
-  // bars stack per author and thin out as the depth slider folds replies away
+  // minimap: every clip is a block — positioned at its creation moment, width
+  // proportional to its duration, packed into stacked lanes when clips
+  // overlap, colored by speaker. Recorded-live conversations tile into the
+  // reply-structure silhouette; the depth slider thins the stacks.
   const box = $('#hist-bars');
   box.innerHTML = '';
   if (histBounds && ts.length > 1) {
     const dm = depthMap();
-    const visible = state.messages.filter(m => (dm.get(m.id) || 0) <= state.filter.depth);
-    const N = 48, span = histBounds.max - histBounds.min || 1;
-    const buckets = Array.from({ length: N }, () => new Map());
+    const visible = state.messages
+      .filter(m => (dm.get(m.id) || 0) <= state.filter.depth && layerOk(m))
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const min = histBounds.min;
+    const span = Math.max(1,
+      Math.max(...visible.map(m => m.createdAt + msgDur(m) * 1000), histBounds.max) - min);
+    const lanes = []; // right edge of the last block in each lane
+    const blocks = [];
     for (const m of visible) {
-      const i = Math.min(N - 1, Math.floor(((m.createdAt - histBounds.min) / span) * N));
-      buckets[i].set(m.author, (buckets[i].get(m.author) || 0) + 1);
-    }
-    const peak = Math.max(1, ...buckets.map(b => [...b.values()].reduce((a, c) => a + c, 0)));
-    for (const bucket of buckets) {
-      const total = [...bucket.values()].reduce((a, c) => a + c, 0);
-      const bar = document.createElement('div');
-      bar.className = 'hist-bar';
-      bar.style.height = total ? `${Math.max(10, (total / peak) * 100)}%` : '0';
-      for (const [author, n] of bucket) {
-        const seg = document.createElement('div');
-        seg.className = 'hist-seg';
-        seg.style.flexGrow = n;
-        seg.style.background = colorFor(author);
-        bar.appendChild(seg);
+      const x0 = (m.createdAt - min) / span;
+      const w = Math.max((msgDur(m) * 1000) / span, 0.006);
+      let L = lanes.findIndex(end => end <= x0 + 0.002);
+      if (L === -1) {
+        if (lanes.length < 8) { L = lanes.length; lanes.push(0); }
+        else L = lanes.indexOf(Math.min(...lanes)); // crowded — least-bad lane
       }
-      box.appendChild(bar);
+      lanes[L] = x0 + w;
+      blocks.push({ x0, w, L, author: m.author });
+    }
+    const laneH = 100 / Math.max(3, lanes.length);
+    for (const b of blocks) {
+      const el = document.createElement('div');
+      el.className = 'mini-block';
+      el.style.left = `${b.x0 * 100}%`;
+      el.style.width = `${Math.min(b.w, 1 - b.x0) * 100}%`;
+      el.style.bottom = `${b.L * laneH}%`;
+      el.style.height = `${laneH}%`;
+      el.style.background = colorFor(b.author);
+      box.appendChild(el);
     }
   }
 
