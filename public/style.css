@@ -538,7 +538,8 @@ body.role-viewer #splitter { bottom: 0; }
 
 /* ---------- timeline lens (time window + depth fold) ---------- */
 #history-bar {
-  position: fixed; top: 56px; left: 12px; right: 12px; z-index: 79;
+  position: fixed; top: 72px; right: 12px; z-index: 79;
+  width: min(720px, calc(100vw - 24px));
   background: var(--panel-2); border: 1px solid #2e3342; border-radius: 14px;
   padding: 10px 14px 8px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
 }
