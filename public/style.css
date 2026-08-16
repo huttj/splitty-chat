@@ -705,4 +705,6 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
   .msg { padding: 9px 8px 9px 10px; margin-bottom: 10px; }
   .msg .msg { margin: 8px 0; }
   #controls { right: 6px; bottom: calc(8px + env(safe-area-inset-bottom)); gap: 6px; }
+  /* the always-visible transport already has play/stop — float only record */
+  #pause-btn, #stop-btn { display: none !important; }
 }

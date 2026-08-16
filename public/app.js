@@ -1705,17 +1705,37 @@ function stopPlayback() {
   updateHint();
 }
 
+// bring the transcript back to where playback is about to speak
+function scrollToHighlight() {
+  const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
+  const msg = seg && state.byId.get(seg.id);
+  if (!msg || !msg.words.length) return;
+  const t = activeEl().currentTime;
+  let i = msg.words.findIndex(w => t < w.e);
+  if (i === -1) i = msg.words.length - 1;
+  document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`)
+    ?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
 function togglePause() {
   if (state.rec) return; // never un-pause under a recording
   if (audioCtx?.state === 'suspended') audioCtx.resume(); // still in the tap's gesture
   if (!state.playing) {
     // transport is always visible now — play from the scrubber's position
     if (!state.playlist.length) buildPlaylist();
-    if (state.playlist.length) seekVirtual(Number($('#scrubber').value) || 0, true);
+    if (state.playlist.length) {
+      seekVirtual(Number($('#scrubber').value) || 0, true);
+      scrollToHighlight();
+    }
     return;
   }
   const el = activeEl();
-  el.paused ? el.play() : el.pause();
+  if (el.paused) {
+    el.play();
+    scrollToHighlight(); // resuming: show me where we are
+  } else {
+    el.pause();
+  }
 }
 
 function currentVT() {
