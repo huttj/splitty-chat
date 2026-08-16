@@ -156,11 +156,24 @@ function enqueuePrefetch(files, front = false) {
   runPrefetch();
 }
 
+// the person watching always outranks the cache-warmer
+const playbackStarving = () => {
+  if (!state.playing || state.playIdx < 0) return false;
+  const el = activeEl();
+  return !el.paused && (el.readyState < 3 || el._waiting);
+};
+
 async function runPrefetch() {
   if (prefetch.running) return;
   prefetch.running = true;
   while (prefetch.queue.length && prefetch.bytes < prefetch.BUDGET) {
     if (document.hidden) break; // resume on the next enqueue
+    if (playbackStarving()) {
+      // don't fight the active video for bandwidth — retry shortly
+      prefetch.running = false;
+      setTimeout(runPrefetch, 1500);
+      return;
+    }
     const file = prefetch.queue.shift();
     if (prefetch.done.has(file)) continue;
     try {
@@ -176,13 +189,17 @@ async function runPrefetch() {
   prefetch.running = false;
 }
 
-// everything unheard, in the order the conversation would play it
+// everything unheard, in the order the conversation would play it.
+// Long clips are excluded: fully downloading a 60MB video "just in case"
+// starves actual playback (fresh forks made this vivid — every clip is
+// unheard there); big files stream fine on demand via range requests.
 function prefetchUnheard() {
   if (!state.playlist.length) buildPlaylist();
   const files = [];
   for (const seg of state.playlist) {
     const msg = state.byId.get(seg.id);
     if (!msg || isMine(msg.author)) continue;
+    if (msgDur(msg) > 240) continue; // ~4 min ≈ 35MB — past that, stream it
     if ((state.seen[msg.id] || 0) < (msg.durationMs || 0) - 500) files.push(msg.file);
   }
   enqueuePrefetch([...new Set(files)]);
