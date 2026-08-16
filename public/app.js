@@ -84,7 +84,20 @@ const normName = s => (s || '').trim().toLowerCase();
 const isMine = author => normName(author) === normName(state.name);
 
 const USER_COLORS = ['#7c5cff', '#4dc9b0', '#e08bff', '#ffa94d', '#5db3ff', '#ff6b9d', '#9ee36b', '#ffd166'];
+// per-chat palette: authors get colors in order of first appearance, so no
+// two people collide until the palette runs out (name-hashing collided)
+let authorColors = new Map();
+function rebuildAuthorColors() {
+  const m = new Map();
+  for (const msg of [...state.messages].sort((a, b) => a.createdAt - b.createdAt)) {
+    const k = normName(msg.author);
+    if (!m.has(k)) m.set(k, USER_COLORS[m.size % USER_COLORS.length]);
+  }
+  authorColors = m;
+}
 function colorFor(name) {
+  const c = authorColors.get(normName(name));
+  if (c) return c;
   let h = 0;
   for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return USER_COLORS[h % USER_COLORS.length];
@@ -1251,6 +1264,7 @@ async function poll() {
     const data = await res.json();
     state.messages = data.messages;
     state.byId = new Map(data.messages.map(m => [m.id, m]));
+    rebuildAuthorColors();
     state.chatMeta = data.chat;
     state.isOwner = !!data.isOwner;
     state.members = data.members || [];
@@ -3291,6 +3305,7 @@ const fmtTime = ts => {
 // same visibility rules that build the transcript and the playlist.
 let histBounds = null; // { min, max } createdAt across the whole chat
 let histCount = -1;
+let miniBlocks = [];   // sequential minimap blocks: { t: createdAt, x0, x1 } in [0..1]
 
 function initTimeline() {
   const bar = $('#history-bar');
@@ -3323,14 +3338,25 @@ function initTimeline() {
   function applyTime() {
     const a = +tMinEl.value, b = +tMaxEl.value;
     fillCss(a, b);
-    if (!histBounds || (a <= 0 && b >= 1000)) {
+    // the minimap is sequential, so the window maps through block-space:
+    // covered blocks define the creation-time range being kept
+    if (!miniBlocks.length || (a <= 0 && b >= 1000)) {
       state.filter.t0 = state.filter.t1 = null;
       $('#win-label').textContent = 'All time';
     } else {
-      const span = histBounds.max - histBounds.min || 1;
-      state.filter.t0 = histBounds.min + span * (a / 1000);
-      state.filter.t1 = histBounds.min + span * (b / 1000);
-      $('#win-label').textContent = `${fmtT(state.filter.t0)} – ${fmtT(state.filter.t1)}`;
+      const af = a / 1000, bf = b / 1000;
+      const first = miniBlocks.find(bl => bl.x1 > af + 1e-6);
+      const covered = miniBlocks.filter(bl => bl.x0 < bf - 1e-6);
+      const last = covered[covered.length - 1];
+      if (!first || !last || first.t > last.t) {
+        state.filter.t0 = 1; // empty window — nothing qualifies
+        state.filter.t1 = 0;
+        $('#win-label').textContent = 'Nothing in window';
+      } else {
+        state.filter.t0 = first.t;
+        state.filter.t1 = last.t;
+        $('#win-label').textContent = `${fmtT(first.t)} – ${fmtT(last.t)}`;
+      }
     }
     throttledRefresh();
   }
@@ -3432,43 +3458,35 @@ function refreshTimelinePanel(force = false) {
   const ts = state.messages.map(m => m.createdAt);
   histBounds = ts.length ? { min: Math.min(...ts), max: Math.max(...ts) } : null;
 
-  // minimap: every clip is a block — positioned at its creation moment, width
-  // proportional to its duration, packed into stacked lanes when clips
-  // overlap, colored by speaker. Recorded-live conversations tile into the
-  // reply-structure silhouette; the depth slider thins the stacks.
+  // minimap: sequential, not wall-clock — clips lay out in creation order,
+  // widths proportional to duration, small gaps between. A chat of separated
+  // sessions has no dead space; colors are per speaker; the depth slider
+  // thins which clips appear. The window slider maps through this
+  // block-space back to creation times.
   const box = $('#hist-bars');
   box.innerHTML = '';
-  if (histBounds && ts.length > 1) {
+  miniBlocks = [];
+  {
     const dm = depthMap();
     const visible = state.messages
       .filter(m => (dm.get(m.id) || 0) <= state.filter.depth && layerOk(m))
       .sort((a, b) => a.createdAt - b.createdAt);
-    const min = histBounds.min;
-    const span = Math.max(1,
-      Math.max(...visible.map(m => m.createdAt + msgDur(m) * 1000), histBounds.max) - min);
-    const lanes = []; // right edge of the last block in each lane
-    const blocks = [];
-    for (const m of visible) {
-      const x0 = (m.createdAt - min) / span;
-      const w = Math.max((msgDur(m) * 1000) / span, 0.006);
-      let L = lanes.findIndex(end => end <= x0 + 0.002);
-      if (L === -1) {
-        if (lanes.length < 8) { L = lanes.length; lanes.push(0); }
-        else L = lanes.indexOf(Math.min(...lanes)); // crowded — least-bad lane
+    if (visible.length) {
+      const GAP = Math.min(0.004, 0.15 / Math.max(visible.length, 1));
+      const usable = 1 - GAP * (visible.length - 1);
+      const totalDur = visible.reduce((a, m) => a + Math.max(msgDur(m), 1), 0);
+      let x = 0;
+      for (const m of visible) {
+        const w = (Math.max(msgDur(m), 1) / totalDur) * usable;
+        miniBlocks.push({ t: m.createdAt, x0: x, x1: x + w });
+        const el = document.createElement('div');
+        el.className = 'mini-block';
+        el.style.left = `${x * 100}%`;
+        el.style.width = `${Math.max(w * 100, 0.2)}%`;
+        el.style.background = colorFor(m.author);
+        box.appendChild(el);
+        x += w + GAP;
       }
-      lanes[L] = x0 + w;
-      blocks.push({ x0, w, L, author: m.author });
-    }
-    const laneH = 100 / Math.max(3, lanes.length);
-    for (const b of blocks) {
-      const el = document.createElement('div');
-      el.className = 'mini-block';
-      el.style.left = `${b.x0 * 100}%`;
-      el.style.width = `${Math.min(b.w, 1 - b.x0) * 100}%`;
-      el.style.bottom = `${b.L * laneH}%`;
-      el.style.height = `${laneH}%`;
-      el.style.background = colorFor(b.author);
-      box.appendChild(el);
     }
   }
 
