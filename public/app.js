@@ -1791,8 +1791,12 @@ function tickHighlight() {
   // highlight is halfway through a word before it's spoken — lag the visual
   // clock (only the glow; seeks and splice boundaries keep the raw times).
   // The error varies (silence gets folded into word spans), so the lag is
-  // user-tunable from the menu.
-  focusWordAt(seg, el.currentTime - state.wordLag, 'speaking');
+  // user-tunable from the menu. On top of that, playback audio routes
+  // through WebAudio (the compressor), whose output latency is tiny on
+  // desktop but 100-500ms on mobile/Bluetooth — currentTime runs that far
+  // ahead of what's actually HEARD, so compensate with the measured value.
+  const outLag = audioCtx ? (audioCtx.outputLatency || audioCtx.baseLatency || 0) : 0;
+  focusWordAt(seg, el.currentTime - state.wordLag - outLag, 'speaking');
   tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);
