@@ -1811,10 +1811,14 @@ function tickHighlight() {
   // through WebAudio (the compressor), whose output latency is tiny on
   // desktop but 100-500ms on mobile/Bluetooth — currentTime runs that far
   // ahead of what's actually HEARD, so compensate with the measured value.
-  // output latency is WALL-clock — at raised speeds the media clock runs
-  // rate× content-seconds ahead of the heard audio, so scale it
+  // The tuned slider and the measured audio-output latency are two estimates
+  // of the SAME wall-clock delay (desktop under-reports latency, so the
+  // slider historically absorbed it) — take the larger, never the sum, or
+  // honestly-reporting devices double-count. Latency is wall-clock, so it
+  // scales by playback rate.
   const outLag = audioCtx ? (audioCtx.outputLatency || audioCtx.baseLatency || 0) : 0;
-  focusWordAt(seg, el.currentTime - state.wordLag - outLag * (el.playbackRate || 1), 'speaking');
+  const comp = Math.max(state.wordLag, outLag * (el.playbackRate || 1));
+  focusWordAt(seg, el.currentTime - comp, 'speaking');
   tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);
