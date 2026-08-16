@@ -708,3 +708,6 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
   /* the always-visible transport already has play/stop — float only record */
   #pause-btn, #stop-btn { display: none !important; }
 }
+
+/* the record cluster is draggable */
+#controls { touch-action: none; cursor: grab; }

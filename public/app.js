@@ -899,10 +899,43 @@ function initChat() {
     document.addEventListener('pointerup', onUp, { once: true });
   });
 
-  $('#rec-btn').onclick = toggleRecord;
-  $('#stop-btn').onclick = stopPlayback; // clears the session: next record = new message
+  const noDragClick = fn => () => {
+    if (performance.now() - controlsDragTs < 350) return; // that was a drag, not a tap
+    fn();
+  };
+  $('#rec-btn').onclick = noDragClick(toggleRecord);
+  $('#stop-btn').onclick = noDragClick(stopPlayback); // clears the session: next record = new message
   $('#btn-stop').onclick = stopPlayback;
-  $('#pause-btn').onclick = togglePause;
+  $('#pause-btn').onclick = noDragClick(togglePause);
+
+  // drag the record cluster anywhere; taps still do their thing
+  state.recPos = JSON.parse(localStorage.getItem('splitty:recpos') || 'null');
+  applyControlsPos();
+  window.addEventListener('resize', applyControlsPos);
+  $('#controls').addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    const c = $('#controls');
+    const start = { x: e.clientX, y: e.clientY };
+    const rect = c.getBoundingClientRect();
+    let moved = false;
+    const onMove = ev => {
+      if (!moved && Math.abs(ev.clientX - start.x) + Math.abs(ev.clientY - start.y) < 8) return;
+      moved = true;
+      state.recPos = {
+        xr: (ev.clientX - (start.x - rect.left)) / innerWidth,
+        br: (innerHeight - (ev.clientY + (rect.bottom - start.y))) / innerHeight,
+      };
+      applyControlsPos();
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', () => {
+      document.removeEventListener('pointermove', onMove);
+      if (moved) {
+        controlsDragTs = performance.now();
+        localStorage.setItem('splitty:recpos', JSON.stringify(state.recPos));
+      }
+    }, { once: true });
+  });
   $('#self-btn').onclick = () => {
     state.selfHide = !state.selfHide;
     localStorage.setItem('splitty:selfhide', state.selfHide ? '1' : '');
@@ -1522,6 +1555,19 @@ function playFrom(msgId, atSec, autoplay = true) {
 // transcript click = seek only (keep playing if playing, stay paused if not);
 // double-click = seek and play; drag = scrub. Makes placing comments precise.
 let transcriptDragTs = 0; // the click that trails a drag isn't a seek
+let controlsDragTs = 0;   // ditto for the record cluster
+
+// the record cluster parks wherever it was dropped — anchored by its
+// bottom-left corner so the hint pill still grows upward
+function applyControlsPos() {
+  const c = $('#controls');
+  const g = state.recPos;
+  if (!g) return;
+  const r = c.getBoundingClientRect();
+  const x = Math.min(Math.max(g.xr * innerWidth, 4), innerWidth - r.width - 4);
+  const b = Math.min(Math.max(g.br * innerHeight, 4), innerHeight - r.height - 4);
+  Object.assign(c.style, { left: `${x}px`, bottom: `${b}px`, right: 'auto', top: 'auto' });
+}
 function seekTranscript(msgId, atSec) {
   if (performance.now() - transcriptDragTs < 350) return;
   const keepPlaying = state.playing && !activeEl().paused;
