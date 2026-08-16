@@ -1044,8 +1044,18 @@ function syncPlayButton() {
 // ---------- message tree ----------
 // roots/children respect the time window; depth is positional and handled by
 // the callers (segmentsFor / renderMessage), so playback and transcript can
-// never disagree about what's visible
-const roots = () => state.messages.filter(m => !m.parentId && inWindow(m)).sort((a, b) => a.createdAt - b.createdAt);
+// never disagree about what's visible.
+// The window filters each message by its OWN timestamp: replies outlive a
+// parent that slides out of the window — they promote to top level (orphans)
+// instead of vanishing with it.
+const hasVisibleParent = m => {
+  if (!m.parentId) return false;
+  const p = state.byId.get(m.parentId);
+  return !!p && inWindow(p);
+};
+const roots = () => state.messages
+  .filter(m => inWindow(m) && !hasVisibleParent(m))
+  .sort((a, b) => a.createdAt - b.createdAt);
 const childrenOf = id =>
   state.messages.filter(m => m.parentId === id && inWindow(m))
     .sort((a, b) => (a.anchorMs - b.anchorMs) || (a.createdAt - b.createdAt));
@@ -2563,6 +2573,7 @@ function initTimeline() {
     state.filter.depth = v >= max ? Infinity : v;
     state.filter.expanded.clear(); // moving the slider resets chip overrides
     $('#depth-label').textContent = v >= max ? 'All' : v === 0 ? 'Roots' : String(v);
+    refreshTimelinePanel(true); // the histogram thins along with the fold level
     throttledRefresh();
   }
   dr.oninput = applyDepth;
@@ -2577,7 +2588,7 @@ function initTimeline() {
   };
 }
 
-function maxTreeDepth() {
+function depthMap() {
   const memo = new Map();
   const d = m => {
     if (!m.parentId) return 0;
@@ -2587,7 +2598,12 @@ function maxTreeDepth() {
     memo.set(m.id, v);
     return v;
   };
-  return state.messages.length ? Math.max(...state.messages.map(d)) : 0;
+  for (const m of state.messages) memo.set(m.id, d(m));
+  return memo;
+}
+
+function maxTreeDepth() {
+  return state.messages.length ? Math.max(...depthMap().values()) : 0;
 }
 
 // histogram + slider bounds follow the data; runs on open and on new messages
@@ -2598,18 +2614,32 @@ function refreshTimelinePanel(force = false) {
   const ts = state.messages.map(m => m.createdAt);
   histBounds = ts.length ? { min: Math.min(...ts), max: Math.max(...ts) } : null;
 
+  // bars stack per author and thin out as the depth slider folds replies away
   const box = $('#hist-bars');
   box.innerHTML = '';
   if (histBounds && ts.length > 1) {
+    const dm = depthMap();
+    const visible = state.messages.filter(m => (dm.get(m.id) || 0) <= state.filter.depth);
     const N = 48, span = histBounds.max - histBounds.min || 1;
-    const counts = new Array(N).fill(0);
-    for (const t of ts) counts[Math.min(N - 1, Math.floor(((t - histBounds.min) / span) * N))]++;
-    const peak = Math.max(...counts);
-    for (const c of counts) {
-      const b = document.createElement('div');
-      b.className = 'hist-bar';
-      b.style.height = c ? `${Math.max(8, (c / peak) * 100)}%` : '0';
-      box.appendChild(b);
+    const buckets = Array.from({ length: N }, () => new Map());
+    for (const m of visible) {
+      const i = Math.min(N - 1, Math.floor(((m.createdAt - histBounds.min) / span) * N));
+      buckets[i].set(m.author, (buckets[i].get(m.author) || 0) + 1);
+    }
+    const peak = Math.max(1, ...buckets.map(b => [...b.values()].reduce((a, c) => a + c, 0)));
+    for (const bucket of buckets) {
+      const total = [...bucket.values()].reduce((a, c) => a + c, 0);
+      const bar = document.createElement('div');
+      bar.className = 'hist-bar';
+      bar.style.height = total ? `${Math.max(10, (total / peak) * 100)}%` : '0';
+      for (const [author, n] of bucket) {
+        const seg = document.createElement('div');
+        seg.className = 'hist-seg';
+        seg.style.flexGrow = n;
+        seg.style.background = colorFor(author);
+        bar.appendChild(seg);
+      }
+      box.appendChild(bar);
     }
   }
 
