@@ -3697,12 +3697,16 @@ function drawViz(c, W, H, energy) {
     const hz = lo * Math.pow(hi / lo, k / PTS);
     ys.push((at ? Math.min(1, at(hz) * 1.25) : 0) * span);
   }
-  // one smooth curve through the points: left edge (treble) → center (bass) → right edge
-  const trace = flip => {
+  // one smooth curve through the points: left edge (treble) → center (bass) →
+  // right edge. reverse = right → left, continuing the current path (no moveTo),
+  // so a fill of top + reversed bottom is ONE closed shape — two subpaths would
+  // each close with their own straight line, a diagonal across the lens
+  const trace = (flip, reverse = false) => {
     const xs = [], yy = [];
     for (let k = PTS; k >= 0; k--) { xs.push(half - (k / PTS) * half); yy.push(mid + flip * ys[k]); }
     for (let k = 1; k <= PTS; k++) { xs.push(half + (k / PTS) * half); yy.push(mid + flip * ys[k]); }
-    c.moveTo(xs[0], yy[0]);
+    if (reverse) { xs.reverse(); yy.reverse(); c.lineTo(xs[0], yy[0]); }
+    else c.moveTo(xs[0], yy[0]);
     const n = xs.length;
     for (let i = 0; i < n - 1; i++) {
       const p0 = yy[Math.max(i - 1, 0)], p1 = yy[i], p2 = yy[i + 1], p3 = yy[Math.min(i + 2, n - 1)];
@@ -3741,10 +3745,8 @@ function drawViz(c, W, H, energy) {
   // re-spans (or flips) as the shape breathes
   if (level > 0.01) {
     c.beginPath();
-    trace(-1);
-    c.lineTo(W, mid);
-    trace(1);
-    c.lineTo(0, mid);
+    trace(-1);        // top, left → right
+    trace(1, true);   // bottom, right → left, same subpath
     c.closePath();
     const hg = c.createLinearGradient(0, mid - span, 0, mid + span);
     hg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark + 18}%, ${0.1 + 0.25 * level})`);
