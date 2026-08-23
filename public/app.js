@@ -3716,16 +3716,24 @@ function drawViz(c, W, H, energy) {
     return g;
   };
   c.lineJoin = 'round';
-  if (!simple) {
-    // body: a wash from the line down to the midline
+  // the hollow: inside the lens (line + its reflection), a gentle gradient
+  // from the line's color at the boundary to nothing at the center
+  if (level > 0.01) {
     c.beginPath();
     trace(-1);
-    c.lineTo(W, mid); c.lineTo(0, mid); c.closePath();
-    const fg = c.createLinearGradient(0, mid - span, 0, mid);
-    fg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark + 20}%, ${0.05 + 0.16 * level})`);
-    fg.addColorStop(1, `hsla(${hue}, ${sat}%, ${dark}%, 0)`);
-    c.fillStyle = fg;
+    c.lineTo(W, mid);
+    trace(1);
+    c.lineTo(0, mid);
+    c.closePath();
+    const peak = Math.max(...ys, 1);
+    const hg = c.createRadialGradient(half, mid, 0, half, mid, Math.max(half, peak));
+    hg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark}%, 0)`);
+    hg.addColorStop(0.55, `hsla(${hue}, ${sat}%, ${dark}%, ${0.02 + 0.05 * level})`);
+    hg.addColorStop(1, `hsla(${hue}, ${sat}%, ${dark + 15}%, ${0.08 + 0.22 * level})`);
+    c.fillStyle = hg;
     c.fill();
+  }
+  if (!simple) {
     // reflection: the same line below, fainter, no glow
     c.beginPath();
     trace(1);
