@@ -48,6 +48,8 @@ const state = {
   silPad: (v => Number.isFinite(v) ? v : 0.7)(parseFloat(localStorage.getItem('splitty:silpad'))),
   // minimum silence that must survive the shoulders for a pause to be trimmed
   silMin: (v => Number.isFinite(v) ? v : 0.25)(parseFloat(localStorage.getItem('splitty:silmin'))),
+  // a pause this long breaks the transcript into a new paragraph — tunable
+  parPause: (v => Number.isFinite(v) ? v : 1.2)(parseFloat(localStorage.getItem('splitty:parpause'))),
   // hide your own floating preview while watching (camera stays on)
   selfHide: localStorage.getItem('splitty:selfhide') === '1',
   // voice-only: no camera at all — clips are audio files, the box shows a
@@ -617,6 +619,19 @@ function initMenu() {
     paintPad();
     trimChanged();
   };
+  // a pause this long starts a new paragraph in the transcript
+  const par = $('#par-range'), parLabel = $('#par-label');
+  const paintPar = () => (parLabel.textContent = `${state.parPause.toFixed(1)}s`);
+  par.value = state.parPause;
+  paintPar();
+  let parTimer = null;
+  par.oninput = () => {
+    state.parPause = +par.value;
+    localStorage.setItem('splitty:parpause', String(state.parPause));
+    paintPar();
+    clearTimeout(parTimer);
+    parTimer = setTimeout(() => { state.lastRenderKey = ''; render(); }, 150); // re-flow, debounced for drags
+  };
   // how much silence must survive the shoulders before a pause is worth trimming
   const min = $('#min-range'), minLabel = $('#min-label');
   const paintMin = () => (minLabel.textContent = `${Math.round(state.silMin * 1000)}ms`);
@@ -937,7 +952,7 @@ function initChat() {
         previewVirtual(vt);
       }
     };
-    const scrubTo = (span, clientX) => {
+    const scrubTo = (span, clientX, clientY) => {
       const msg = state.byId.get(span.dataset.mid);
       if (!msg || span.dataset.t == null) return;
       // interpolate within the word/gap from the pointer's x — but the outer
@@ -946,7 +961,9 @@ function initChat() {
       const rect = span.getBoundingClientRect();
       const s = Number(span.dataset.t);
       const en = Number(span.dataset.e ?? span.dataset.t);
-      const f = Math.min(Math.max((clientX - rect.left) / Math.max(rect.width, 1), 0), 1);
+      const f = span.classList.contains('gap-br')
+        ? Math.min(Math.max((clientY - rect.top) / Math.max(rect.height, 1), 0), 1) // vertical gap: y runs the pause
+        : Math.min(Math.max((clientX - rect.left) / Math.max(rect.width, 1), 0), 1);
       const t = f < 0.2 ? s : f > 0.8 ? Math.max(en - 0.001, s) : s + f * Math.max(0, en - s);
       const vt = vtOfMsgTime(span.dataset.mid, t + 0.0005);
       if (vt == null) return;
@@ -980,7 +997,7 @@ function initChat() {
       const under = document.elementFromPoint(ev.clientX, ev.clientY);
       const span = under?.closest?.('.word, .gap');
       if (span) {
-        scrubTo(span, ev.clientX);
+        scrubTo(span, ev.clientX, ev.clientY);
         return;
       }
       // not over a word: the card's margins are seek targets too — above the
@@ -2311,6 +2328,7 @@ function renderLayerList() {
 function transcriptText() {
   if (!state.playlist.length) buildPlaylist();
   const dm = depthMap();
+  const indentOf = id => '  '.repeat(Math.min(dm.get(id) || 0, 6));
   const blocks = [];
   const segs = state.playlist;
   for (let i = 0; i < segs.length;) {
@@ -2322,17 +2340,23 @@ function transcriptText() {
     if (msg) {
       const words = [];
       for (let k = i; k <= j; k++) {
+        let prev = null;
         for (const w of msg.words) {
-          if (w.s >= segs[k].start - 0.001 && w.s < segs[k].end) words.push(w.w);
+          if (w.s >= segs[k].start - 0.001 && w.s < segs[k].end) {
+            // a paragraph pause becomes a line break in the text too
+            if (prev && w.s - prev.e >= state.parPause) words.push('\n' + indentOf(id));
+            words.push(w.w);
+            prev = w;
+          }
         }
       }
       const cont = blocks.some(b => b.id === id);
       if (words.length || !cont) {
-        const indent = '  '.repeat(Math.min(dm.get(id) || 0, 6));
+        const indent = indentOf(id);
         blocks.push({
           id,
           text: `${indent}[${fmtClock(startV)}] ${msg.author}${cont ? ' (cont.)' : ''}:\n`
-            + `${indent}${words.join(' ') || '(no transcript)'}`,
+            + `${indent}${words.join(' ').replace(/ \n/g, '\n').replace(/\n /g, '\n') || '(no transcript)'}`,
         });
       }
     }
@@ -3215,7 +3239,7 @@ function vizFrame(now) {
   viz.raf = requestAnimationFrame(vizFrame);
   const t = (now - viz.t0) / 1000;
   // size to the box (device pixels, capped — it's a glow, not text)
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5); // the neon blur is the one costly thing — keep pixels modest
   const W = Math.round(viz.el.clientWidth * dpr), H = Math.round(viz.el.clientHeight * dpr);
   if (!W || !H) return;
   if (viz.el.width !== W || viz.el.height !== H) { viz.el.width = W; viz.el.height = H; }
@@ -3272,21 +3296,20 @@ function drawViz(c, W, H, t, b) {
     c.lineTo((crest.length - 1) * step, edge);
     c.closePath();
     const fg = c.createLinearGradient(0, yc - flip * amp, 0, edge);
-    fg.addColorStop(0, `hsla(${hue}, 90%, ${light}%, ${0.22 + 0.3 * level})`);
-    fg.addColorStop(0.6, `hsla(${hue}, 90%, ${light - 10}%, ${0.05 + 0.1 * level})`);
+    fg.addColorStop(0, `hsla(${hue}, 90%, ${light}%, ${0.06 + 0.1 * level})`);
     fg.addColorStop(1, `hsla(${hue}, 90%, ${light - 20}%, 0)`);
     c.fillStyle = fg;
     c.fill();
-    // crest: a wide soft halo under a thin line, both a step lighter than the body
+    // crest: a thin neon line — the glow is a real blur, not a wider stroke,
+    // and the width never changes with volume (brightness does)
     c.beginPath();
     crest.forEach((y, i) => (i ? c.lineTo(i * step, y) : c.moveTo(0, y)));
-    // (constant widths — volume moves and brightens the ribbons, never thickens them)
-    c.strokeStyle = `hsla(${hue}, 90%, ${light + 8}%, ${0.12 + 0.3 * level})`;
-    c.lineWidth = 8 * scale;
+    c.shadowColor = `hsla(${hue}, 100%, ${light + 10}%, ${0.5 + 0.5 * level})`;
+    c.shadowBlur = 14 * scale;
+    c.strokeStyle = `hsla(${hue}, 90%, ${light + 22}%, ${0.45 + 0.55 * level})`;
+    c.lineWidth = 1.3 * scale;
     c.stroke();
-    c.strokeStyle = `hsla(${hue}, 90%, ${light + 18}%, ${0.3 + 0.45 * level})`;
-    c.lineWidth = 1.6 * scale;
-    c.stroke();
+    c.shadowBlur = 0;
   }
   // a soft core that swells with the voice — the lightest tint of the same hue
   const rad = Math.min(W, H) * (0.18 + 0.32 * energy);
@@ -3649,17 +3672,22 @@ function renderMessage(msg, depth, unlocked = false) {
   // interleave words with interjections, split at each anchor
   const kids = childrenOf(msg.id);
   let wi = 0;
-  // audible silences render as widening dotted gaps (gi = index of the word after the pause)
+  // audible silences render as widening dotted gaps (gi = index of the word
+  // after the pause). Short ones sit inline; a pause long enough to be a
+  // new thought breaks the line and stands as a vertical dotted gap whose
+  // height grows with the silence — the paragraph spacing IS the pause.
   const makeGap = (prevEnd, nextStart, gi) => {
     const gapSec = nextStart - prevEnd;
     if (gapSec < 0.4) return null;
     const g = document.createElement('span');
-    g.className = 'gap';
+    const br = gapSec >= state.parPause && gi > 0 && gi < msg.words.length; // edges never break
+    g.className = br ? 'gap gap-br' : 'gap';
     g.dataset.mid = msg.id;
     g.dataset.gi = gi;
     g.dataset.t = prevEnd;   // scrub range, same shape as words
     g.dataset.e = nextStart;
-    g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
+    if (br) g.style.height = `${Math.round(Math.min(10 + (gapSec - state.parPause) * 6, 34))}px`;
+    else g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
     g.title = `${gapSec.toFixed(1)}s pause`;
     g.onclick = () => tapTranscript(msg.id, prevEnd + 0.01);
     return g;
