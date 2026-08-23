@@ -2993,7 +2993,11 @@ function oklch(L, C, h) {
   });
   return `rgb(${srgb.join(',')})`;
 }
-const exprColor = x => oklch(0.58 + 0.28 * x.energy, 0.035 + 0.13 * x.flow, 264 + 121 * x.tension); // 264° blue → 385°≡25° red
+// 264° blue → 385°≡25° red. Text is a thin stroke and reads dimmer than the
+// same color filling an area, so the word variant is lifted to match by eye.
+const exprColor = (x, text = false) => text
+  ? oklch(0.7 + 0.24 * x.energy, 0.06 + 0.14 * x.flow, 264 + 121 * x.tension)
+  : oklch(0.58 + 0.28 * x.energy, 0.035 + 0.13 * x.flow, 264 + 121 * x.tension);
 
 // Older messages have no track: the author (or an editor) quietly computes
 // one from the stored voice audio and saves it — one at a time, only while
@@ -3687,7 +3691,7 @@ function drawViz(c, W, H, energy) {
   // to treble at the right edge, mirrored to the left. Its color runs dark at
   // the center to light at the edges (bass → treble), and it casts a fainter
   // reflection below the midline.
-  const PTS = 64, lo = VIZ_BANDS[0][0], hi = VIZ_BANDS[VIZ_N - 1][1];
+  const PTS = simple ? 32 : 64, lo = VIZ_BANDS[0][0], hi = VIZ_BANDS[VIZ_N - 1][1];
   const ys = [];
   for (let k = 0; k <= PTS; k++) {
     const hz = lo * Math.pow(hi / lo, k / PTS);
@@ -3707,17 +3711,34 @@ function drawViz(c, W, H, energy) {
     }
   };
   const level = energy;
-  const dark = 34 * viz.sat + 60 * (1 - viz.sat), light = 80 * viz.sat + 92 * (1 - viz.sat);
+  const dark = 28 * viz.sat + 58 * (1 - viz.sat), light = 88 * viz.sat + 95 * (1 - viz.sat);
+  // along the line: dark at the center (bass), climbing steeply to bright at
+  // the edges (treble) — the extra stops push the brightness outward
   const grad = alpha => {
     const g = c.createLinearGradient(0, 0, W, 0);
+    const midL = (dark + light) / 2;
     g.addColorStop(0, `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`);
+    g.addColorStop(0.22, `hsla(${hue}, ${sat}%, ${midL}%, ${alpha})`);
     g.addColorStop(0.5, `hsla(${hue}, ${sat}%, ${dark}%, ${alpha})`);
+    g.addColorStop(0.78, `hsla(${hue}, ${sat}%, ${midL}%, ${alpha})`);
     g.addColorStop(1, `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`);
     return g;
   };
   c.lineJoin = 'round';
-  // the hollow: inside the lens (line + its reflection), a gentle gradient
-  // from the line's color at the boundary to nothing at the center
+  if (simple) {
+    // plain: one color, no fill, no glow — the shape and nothing else
+    c.beginPath();
+    trace(-1);
+    trace(1);
+    c.strokeStyle = `hsla(${hue}, ${sat}%, ${(dark + light) / 2}%, ${0.6 + 0.4 * level})`;
+    c.lineWidth = 1.6 * scale;
+    c.stroke();
+    c.globalCompositeOperation = 'source-over';
+    return;
+  }
+  // the hollow: inside the lens, a gentle gradient from the line's color at
+  // the top and bottom to nothing at the midline — fixed extent, so it never
+  // re-spans (or flips) as the shape breathes
   if (level > 0.01) {
     c.beginPath();
     trace(-1);
@@ -3725,24 +3746,21 @@ function drawViz(c, W, H, energy) {
     trace(1);
     c.lineTo(0, mid);
     c.closePath();
-    const peak = Math.max(...ys, 1);
-    const hg = c.createLinearGradient(0, mid - peak, 0, mid + peak); // top edge → midline → bottom edge
-    hg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark + 15}%, ${0.08 + 0.22 * level})`);
+    const hg = c.createLinearGradient(0, mid - span, 0, mid + span);
+    hg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark + 18}%, ${0.1 + 0.25 * level})`);
     hg.addColorStop(0.5, `hsla(${hue}, ${sat}%, ${dark}%, 0)`);
-    hg.addColorStop(1, `hsla(${hue}, ${sat}%, ${dark + 15}%, ${0.08 + 0.22 * level})`);
+    hg.addColorStop(1, `hsla(${hue}, ${sat}%, ${dark + 18}%, ${0.1 + 0.25 * level})`);
     c.fillStyle = hg;
     c.fill();
   }
-  if (!simple) {
-    c.shadowColor = `hsla(${hue}, ${sat}%, ${light}%, ${0.5 + 0.5 * level})`;
-    c.shadowBlur = 16 * scale;
-  }
+  c.shadowColor = `hsla(${hue}, ${sat}%, ${light}%, ${0.5 + 0.5 * level})`;
+  c.shadowBlur = 16 * scale;
   // the line, above and below alike — thin, its width never changes with volume
   c.beginPath();
   trace(-1);
   trace(1);
-  c.strokeStyle = grad(simple ? 0.6 + 0.4 * level : 0.55 + 0.45 * level);
-  c.lineWidth = (simple ? 1.6 : 1.5) * scale;
+  c.strokeStyle = grad(0.55 + 0.45 * level);
+  c.lineWidth = 1.5 * scale;
   c.stroke();
   c.shadowBlur = 0;
   c.globalCompositeOperation = 'source-over';
@@ -4185,7 +4203,7 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.t = w.s;
       span.dataset.e = w.e;
       span.textContent = w.w;
-      if (expr && state.expr === 'text') span.style.setProperty('--wc', exprColor(expr[wi]));
+      if (expr && state.expr === 'text') span.style.setProperty('--wc', exprColor(expr[wi], true));
       if (expr && state.expr === 'highlight') span.style.setProperty('--hc', exprColor(expr[wi]));
       span.onclick = () => tapTranscript(msg.id, w.s + 0.001);
       frag.appendChild(span);
