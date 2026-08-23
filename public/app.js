@@ -1779,7 +1779,6 @@ function playSegment(idx, offset, autoplay = true) {
     state.playlist.slice(idx + 1, idx + 4).map(s => state.byId.get(s.id)?.file),
     true
   );
-  if (state.playLabel !== msg.author) vizResetSpeaker(); // new voice, new color range
   state.playLabel = msg.author;
   loadScreenFor(msg, at);
   updateStage();
@@ -2864,9 +2863,10 @@ function exprFor(msg) {
   msg._expr = { key, v };
   return v;
 }
-// energy → hue (cool blue … hot red), tension → saturation (calm grey … vivid), flow → lightness (choppy dim … smooth bright)
+// brightness = energy (lux is energy), hue = tension (calm teal … tense coral),
+// saturation = flow (choppy grey … smooth and alive). Kept pastel.
 const exprColor = x =>
-  `hsl(${Math.round(215 - 215 * x.energy)}, ${Math.round(35 + 65 * x.tension)}%, ${Math.round(40 + 24 * x.flow)}%)`;
+  `hsl(${Math.round(195 - 185 * x.tension)}, ${Math.round(22 + 52 * x.flow)}%, ${Math.round(46 + 32 * x.energy)}%)`;
 
 // Older messages have no track: the author (or an editor) quietly computes
 // one from the stored voice audio and saves it — one at a time, only while
@@ -3301,85 +3301,114 @@ function listenToMic(stream) {
     }
     micSrc?.disconnect();
     micSrc = vizCtx.createMediaStreamSource(stream);
-    if (!micAnalyser) {
-      micAnalyser = vizCtx.createAnalyser();
-      micAnalyser.fftSize = 256;
-      micAnalyser.smoothingTimeConstant = 0.7;
-    }
+    if (!micAnalyser) micAnalyser = makeAnalyser(vizCtx);
     micSrc.connect(micAnalyser); // analysis only — never routed to the speakers
     if (vizCtx.state === 'suspended') vizCtx.resume();
-  } catch { /* no WebAudio — the ribbons just drift */ }
+  } catch { /* no WebAudio — the lines just rest */ }
+}
+
+// 2048-point window: fine enough bins for the bands, and a long enough
+// time-domain slice to read the pitch off
+function makeAnalyser(ctx) {
+  const an = ctx.createAnalyser();
+  an.fftSize = 2048;
+  an.smoothingTimeConstant = 0.6;
+  return an;
 }
 
 function playbackAnalyser(el) {
   if (!el._gainNode || !audioCtx) return null;
   if (!el._analyser) {
-    el._analyser = audioCtx.createAnalyser();
-    el._analyser.fftSize = 256;
-    el._analyser.smoothingTimeConstant = 0.7;
+    el._analyser = makeAnalyser(audioCtx);
     el._gainNode.connect(el._analyser); // side tap off the leveled signal
   }
   return el._analyser;
 }
 
-const VIZ_BANDS = [[0, 2], [2, 4], [4, 7], [7, 12], [12, 20], [20, 40]]; // fft bins, speech-weighted
-const VIZ_BINS = 40;    // spectrum curve: bins 0..40 (~7.5kHz at 48k) — where a voice lives
-const VIZ_N = 6;        // ribbons
-// each ribbon follows the spectrum at its own speed: fast ones jump to the
-// sound, slow ones lag — they fan apart while you speak, and settle together
-// (into the same flat line) in silence
-const VIZ_SPEEDS = [0.55, 0.32, 0.2, 0.12, 0.07, 0.04];
+// six lines, one per band of the voice (Hz); each is a wave centered on the
+// midline — long wavelength for bass, short for treble — whose height is that
+// band's level. Nothing else moves: silence is six flat lines.
+const VIZ_BANDS = [[60, 250], [250, 500], [500, 1000], [1000, 2000], [2000, 3500], [3500, 7000]];
+const VIZ_N = VIZ_BANDS.length;
+const VIZ_CYCLES = [1.5, 2.5, 3.5, 5, 7, 10]; // wavelengths across the box, bass → treble
 const viz = {
   el: null, ctx2d: null, raf: 0, mode: 'mic',
-  bands: new Float32Array(VIZ_BANDS.length), smooth: new Float32Array(VIZ_BANDS.length),
-  freq: new Uint8Array(128),
-  spec: new Float32Array(VIZ_BINS + 1),                           // the live spectrum, 0..1
-  ribbons: Array.from({ length: VIZ_N }, () => new Float32Array(VIZ_BINS + 1)),
+  bands: new Float32Array(VIZ_N), smooth: new Float32Array(VIZ_N),
+  freq: new Uint8Array(1024), time: new Float32Array(2048),
   syn: 0, t0: performance.now(),
-  hue: null, // tonal hue from the spectrum — null until a real spectrum has been read
+  hue: null, // from the pitch — null until a voice has been heard
   sat: 0,    // how colored the picture is: 0 = white (silence) … 1 = the voice's hue
-  // the speaker's own range: running mean + spread of the log-centroid. Color
-  // is where the voice sits inside ITS range, not on an absolute scale — a
-  // high voice and a low voice both use the whole wheel, and clip at the ends
-  cMean: null, cDev: 0.35, cN: 0,
+  f0: null,  // smoothed pitch, Hz
+  frame: 0,
 };
+
+// Pitch → hue, fixed: the hue range is cut in two, the bottom half for low
+// voices and the top half for high ones, each zone's typical pitch pinned to
+// the middle of its half — so a low voice and a high voice each spread over
+// their own half, and meet at the boundary between the zones. Clips past the ends.
+//          Hz:  70    120 (low center)  160 (boundary)  210 (high center)  300
+const PITCH_HUE = [[70, 0], [120, 67], [160, 135], [210, 202], [300, 270]];
+function pitchHue(f0) {
+  const lf = Math.log(f0);
+  if (lf <= Math.log(PITCH_HUE[0][0])) return PITCH_HUE[0][1];
+  for (let i = 1; i < PITCH_HUE.length; i++) {
+    const [h1, hue1] = PITCH_HUE[i - 1], [h2, hue2] = PITCH_HUE[i];
+    if (lf <= Math.log(h2)) {
+      const u = (lf - Math.log(h1)) / (Math.log(h2) - Math.log(h1));
+      return hue1 + (hue2 - hue1) * u;
+    }
+  }
+  return PITCH_HUE[PITCH_HUE.length - 1][1];
+}
+
+// pitch off the time-domain slice: normalized autocorrelation, first clean
+// peak in the speaking range (70–400Hz), parabolic refinement
+function livePitch(an) {
+  an.getFloatTimeDomainData(viz.time);
+  const x = viz.time, rate = an.context.sampleRate;
+  const minLag = Math.round(rate / 400), maxLag = Math.round(rate / 70);
+  const len = x.length - maxLag;
+  let e0 = 0;
+  for (let j = 0; j < len; j += 2) e0 += x[j] * x[j];
+  if (e0 / (len / 2) < 1e-5) return 0; // silence
+  let best = 0, bestLag = 0;
+  const scores = new Float32Array(maxLag + 2);
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let sum = 0, e1 = 0;
+    for (let j = 0; j < len; j += 2) { sum += x[j] * x[j + lag]; e1 += x[j + lag] * x[j + lag]; }
+    const r = sum / Math.sqrt(e0 * e1 + 1e-9);
+    scores[lag] = r;
+    if (r > best) { best = r; bestLag = lag; }
+  }
+  if (best < 0.6) return 0; // unvoiced
+  for (let lag = minLag + 1; lag < bestLag; lag++) {
+    if (scores[lag] >= best * 0.9 && scores[lag] >= scores[lag - 1] && scores[lag] >= scores[lag + 1]) { bestLag = lag; break; }
+  }
+  const y0 = scores[bestLag - 1] || 0, y1 = scores[bestLag], y2 = scores[bestLag + 1] || 0;
+  const denom = y0 - 2 * y1 + y2;
+  const shift = denom ? Math.min(0.5, Math.max(-0.5, 0.5 * (y0 - y2) / denom)) : 0;
+  return rate / (bestLag + shift);
+}
 
 function readBands(an, out) {
   an.getByteFrequencyData(viz.freq);
-  VIZ_BANDS.forEach(([a, b], i) => {
-    let sum = 0;
-    for (let k = a; k < b; k++) sum += viz.freq[k];
-    out[i] = Math.min(1, (sum / (b - a) / 255) * 1.4);
-  });
-  // 3-tap smoothing across bins: a low voice's harmonic comb reads as shape, not jitter
-  for (let k = 0; k <= VIZ_BINS; k++) {
-    viz.spec[k] = (viz.freq[Math.max(k - 1, 0)] * 0.25 + viz.freq[k] * 0.5 + viz.freq[k + 1] * 0.25) / 255;
-  }
-  // spectral centroid (power-weighted) → the voice's tonal color
   const binHz = an.context.sampleRate / an.fftSize;
-  let wsum = 0, msum = 0;
-  for (let k = 1; k < 64; k++) { // up to ~12kHz — voice lives well inside this
-    const m = viz.freq[k] * viz.freq[k]; // power-weighted: peaks dominate
-    wsum += m * k * binHz;
-    msum += m;
+  VIZ_BANDS.forEach(([lo, hi], i) => {
+    const a = Math.max(0, Math.round(lo / binHz)), b = Math.max(a + 1, Math.round(hi / binHz));
+    let peak = 0;
+    for (let k = a; k < b; k++) if (viz.freq[k] > peak) peak = viz.freq[k]; // the band's loudest bin
+    out[i] = Math.min(1, (peak / 255) * 1.25);
+  });
+  // pitch every other frame (it's the costly read); hold through unvoiced stretches
+  if ((viz.frame++ & 1) === 0) {
+    const f0 = livePitch(an);
+    if (f0) {
+      const lf = Math.log(f0);
+      viz.f0 = viz.f0 == null || viz.sat < 0.05 ? f0 : Math.exp(Math.log(viz.f0) + (lf - Math.log(viz.f0)) * 0.2);
+      viz.hue = pitchHue(viz.f0);
+    }
   }
-  if (msum < 255 * 255) return; // too quiet to judge — hold the color
-  const f = Math.log(wsum / msum);
-  // learn this speaker's range: quick at first, then a slow drift (~20s of speech)
-  if (viz.cMean == null) { viz.cMean = f; viz.cN = 1; }
-  else {
-    const a = Math.max(0.004, 1 / (++viz.cN));
-    viz.cMean += (f - viz.cMean) * a;
-    viz.cDev += (Math.abs(f - viz.cMean) - viz.cDev) * a;
-  }
-  const z = Math.min(Math.max((f - viz.cMean) / Math.max(viz.cDev * 2.2, 0.15), -1), 1); // clips past ±range
-  const target = (z + 1) * 135; // red (low for them) → violet (high for them)
-  // glide while speaking; out of silence, take the new voice's color outright
-  viz.hue = viz.hue == null || viz.sat < 0.05 ? target : viz.hue + (target - viz.hue) * 0.06;
 }
-
-// a new speaker gets a fresh range (playback hands off between people)
-function vizResetSpeaker() { viz.cMean = null; viz.cDev = 0.35; viz.cN = 0; }
 
 // no analyser on the playing clip: pulse with the words being spoken
 function syntheticBands(out, t) {
@@ -3400,15 +3429,16 @@ function syntheticBands(out, t) {
     const wob = 0.65 + 0.35 * Math.sin(t * (2.1 + i * 0.9) + i * 1.7) * Math.sin(t * 5.3 + i);
     out[i] = viz.syn * wob * (i < 3 ? 1 : 0.6);
   }
-  // a plausible voice-shaped spectrum, scaled by the pulse
-  for (let k = 0; k <= VIZ_BINS; k++) {
-    viz.spec[k] = viz.syn * Math.exp(-k / 9) * (0.7 + 0.3 * Math.sin(t * 7 + k * 1.3));
+  // the stored track has the pitch — color from that
+  const f = msg?.features;
+  if (f && !el.paused) {
+    const p = f.pitch[Math.floor(el.currentTime * f.hz)];
+    if (p > 0) { viz.f0 = p; viz.hue = pitchHue(p); }
   }
 }
 
 function showViz(on, mode = viz.mode) {
   if (!viz.el) { viz.el = $('#viz'); viz.ctx2d = viz.el.getContext('2d'); }
-  if (mode !== viz.mode) vizResetSpeaker();
   viz.mode = mode;
   viz.el.classList.toggle('hidden', !on);
   if (on && !viz.raf) viz.raf = requestAnimationFrame(vizFrame);
@@ -3426,19 +3456,13 @@ function vizFrame(now) {
 
   const an = viz.mode === 'play' ? playbackAnalyser(activeEl()) : micAnalyser;
   if (an) readBands(an, viz.bands);
-  else if (viz.mode === 'play') { viz.hue = null; syntheticBands(viz.bands, t); }
-  else { viz.bands.fill(0); viz.spec.fill(0); }
+  else if (viz.mode === 'play') syntheticBands(viz.bands, t);
+  else viz.bands.fill(0);
   for (let i = 0; i < viz.bands.length; i++) {
     const d = viz.bands[i] - viz.smooth[i];
-    viz.smooth[i] += d * (d > 0 ? 0.45 : 0.1); // quick to rise, slow to settle
+    viz.smooth[i] += d * (d > 0 ? 0.5 : 0.12); // quick to rise, slow to settle
   }
-  // nothing moves without sound: each ribbon is the spectrum followed at its
-  // own speed, and the color bleeds in with the energy — silence is still,
-  // flat and white
-  for (let r = 0; r < VIZ_N; r++) {
-    const rb = viz.ribbons[r], a = VIZ_SPEEDS[r];
-    for (let k = 0; k <= VIZ_BINS; k++) rb[k] += (viz.spec[k] - rb[k]) * a;
-  }
+  // color bleeds in with the energy — silence is still, flat and white
   const energy = (viz.smooth[0] + viz.smooth[1] + viz.smooth[2] + viz.smooth[3]) / 4;
   const satTarget = Math.min(1, Math.max(0, energy - 0.04) * 4);
   viz.sat += (satTarget - viz.sat) * (satTarget > viz.sat ? 0.25 : 0.06);
@@ -3452,50 +3476,32 @@ function drawViz(c, W, H, energy) {
   bg.addColorStop(1, '#05060b');
   c.fillStyle = bg;
   c.fillRect(0, 0, W, H);
-  c.globalCompositeOperation = 'lighter'; // ribbons add up into glow where they cross
+  c.globalCompositeOperation = 'lighter'; // lines add up into glow where they cross
 
-  // one hue at a time — the voice's tonal color (relative to its own range);
-  // the ribbons are its gradient, slowest/darkest through fastest/lightest,
-  // so the picture reads as a single color breathing
+  // one hue — the voice's pitch; the lines are its gradient, bass darkest
+  // through treble lightest, so the picture reads as a single color breathing
   const hue = viz.hue ?? 0;
-  const sat = Math.round(90 * viz.sat); // white at rest, the voice's color when it speaks
+  const sat = Math.round(85 * viz.sat); // white at rest, the voice's color when it speaks
   const scale = W / 800 + 0.6;
-  const mid = H / 2, span = H * 0.42;
-  // smooth the spectrum curve across x: low frequencies left, high right
-  const xs = [];
-  for (let k = 0; k <= VIZ_BINS; k++) xs.push((k / VIZ_BINS) * W);
-  for (let r = VIZ_N - 1; r >= 0; r--) { // slow (dark) first, fast (light) on top
-    const rb = viz.ribbons[r];
-    const shade = 1 - r / (VIZ_N - 1);  // 0 = slowest (dark) … 1 = fastest (light)
+  const mid = H / 2, span = H * 0.4;
+  const step = Math.max(3, Math.round(W / 200));
+  for (let r = 0; r < VIZ_N; r++) {
+    const level = viz.smooth[r];
+    const shade = r / (VIZ_N - 1);      // 0 = bass (dark) … 1 = treble (light)
     const light = (30 + 48 * shade) * viz.sat + (58 + 30 * shade) * (1 - viz.sat);
-    const flip = r % 2 ? -1 : 1;        // alternate ribbons rise from above and below the midline
-    // catmull-rom through the bins: one smooth line, no per-bin spikes
-    const pts = [];
-    for (let k = 0; k <= VIZ_BINS; k++) pts.push(mid - flip * rb[k] * span);
+    const amp = span * level * (r < 2 ? 1 : 0.8);
+    const cyc = VIZ_CYCLES[r], ph = r * 0.9; // fixed phases: the lines never drift
     c.beginPath();
-    c.moveTo(xs[0], pts[0]);
-    for (let k = 0; k < VIZ_BINS; k++) {
-      const p0 = pts[Math.max(k - 1, 0)], p1 = pts[k], p2 = pts[k + 1], p3 = pts[Math.min(k + 2, VIZ_BINS)];
-      const x1 = xs[k], x2 = xs[k + 1], dx = (x2 - x1) / 3;
-      c.bezierCurveTo(x1 + dx, p1 + (p2 - p0) / 6, x2 - dx, p2 - (p3 - p1) / 6, x2, p2);
+    for (let x = 0; x <= W + step; x += step) {
+      const u = Math.min(x / W, 1);
+      const env = Math.sin(u * Math.PI);  // converge at the edges, swell in the middle
+      const y = mid + Math.sin(u * cyc * 2 * Math.PI + ph) * amp * env;
+      x ? c.lineTo(x, y) : c.moveTo(x, y);
     }
-    // body: a faint wash between the line and the midline
-    c.lineTo(xs[VIZ_BINS], mid);
-    c.lineTo(xs[0], mid);
-    c.closePath();
-    c.fillStyle = `hsla(${hue}, ${sat}%, ${light}%, ${0.03 + 0.07 * energy})`;
-    c.fill();
-    // the line itself: thin, with a real neon blur — width never changes with volume
-    c.beginPath();
-    c.moveTo(xs[0], pts[0]);
-    for (let k = 0; k < VIZ_BINS; k++) {
-      const p0 = pts[Math.max(k - 1, 0)], p1 = pts[k], p2 = pts[k + 1], p3 = pts[Math.min(k + 2, VIZ_BINS)];
-      const x1 = xs[k], x2 = xs[k + 1], dx = (x2 - x1) / 3;
-      c.bezierCurveTo(x1 + dx, p1 + (p2 - p0) / 6, x2 - dx, p2 - (p3 - p1) / 6, x2, p2);
-    }
-    c.shadowColor = `hsla(${hue}, ${sat}%, ${light + 10}%, ${0.5 + 0.5 * energy})`;
+    // thin, with a real neon blur — width never changes with volume
+    c.shadowColor = `hsla(${hue}, ${sat}%, ${light + 10}%, ${0.4 + 0.6 * level})`;
     c.shadowBlur = 14 * scale;
-    c.strokeStyle = `hsla(${hue}, ${sat}%, ${light + 22}%, ${0.45 + 0.55 * energy})`;
+    c.strokeStyle = `hsla(${hue}, ${sat}%, ${light + 22}%, ${0.4 + 0.6 * level})`;
     c.lineWidth = 1.3 * scale;
     c.stroke();
     c.shadowBlur = 0;
@@ -3503,8 +3509,8 @@ function drawViz(c, W, H, energy) {
   // a soft core that swells with the voice — the lightest tint of the same hue
   const rad = Math.min(W, H) * (0.18 + 0.32 * energy);
   const og = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, rad);
-  og.addColorStop(0, `hsla(${hue}, ${sat}%, 88%, ${0.45 * energy})`);
-  og.addColorStop(0.5, `hsla(${hue}, ${sat}%, 70%, ${0.14 * energy})`);
+  og.addColorStop(0, `hsla(${hue}, ${sat}%, 88%, ${0.35 * energy})`);
+  og.addColorStop(0.5, `hsla(${hue}, ${sat}%, 70%, ${0.1 * energy})`);
   og.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
   c.fillStyle = og;
   c.fillRect(W / 2 - rad, H / 2 - rad, rad * 2, rad * 2);
@@ -3850,8 +3856,12 @@ function renderMessage(msg, depth, unlocked = false) {
   };
   card.appendChild(head);
 
-  // heat strip: the message's timeline painted word by word with its
-  // expressiveness color (pauses dark); tap anywhere to play from there
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+
+  // heat strip: the message's timeline down the right edge of its text,
+  // painted word by word with its expressiveness color (pauses dark) — drag
+  // or tap along it to play from there
   if (expr && state.expr === 'strip') {
     const dur = msgDur(msg);
     const stops = [];
@@ -3865,17 +3875,36 @@ function renderMessage(msg, depth, unlocked = false) {
     if (prev < 100) stops.push(`transparent ${prev}% 100%`);
     const strip = document.createElement('div');
     strip.className = 'heat';
-    strip.title = 'Energy · tension · flow — hue, saturation, brightness';
-    strip.style.backgroundImage = `linear-gradient(90deg, ${stops.join(', ')})`;
-    strip.onclick = e => {
+    strip.title = 'Brightness: energy · hue: tension · saturation: flow';
+    strip.style.backgroundImage = `linear-gradient(180deg, ${stops.join(', ')})`;
+    const at = e => {
       const r = strip.getBoundingClientRect();
-      tapTranscript(msg.id, ((e.clientX - r.left) / Math.max(r.width, 1)) * dur);
+      return Math.min(Math.max((e.clientY - r.top) / Math.max(r.height, 1), 0), 1) * dur;
     };
-    card.appendChild(strip);
+    strip.addEventListener('pointerdown', e => {
+      e.stopPropagation();
+      strip.setPointerCapture(e.pointerId);
+      const vt0 = vtOfMsgTime(msg.id, at(e));
+      if (vt0 != null) { $('#scrubber').value = vt0; updateTimeLabel(vt0); scrubFocus(vt0); }
+      const move = ev => {
+        const vt = vtOfMsgTime(msg.id, at(ev));
+        if (vt == null) return;
+        $('#scrubber').value = vt;
+        updateTimeLabel(vt);
+        scrubFocus(vt);
+      };
+      const up = ev => {
+        strip.removeEventListener('pointermove', move);
+        strip.removeEventListener('pointerup', up);
+        clearScrubFocus();
+        tapTranscript(msg.id, at(ev));
+      };
+      strip.addEventListener('pointermove', move);
+      strip.addEventListener('pointerup', up);
+    });
+    card.classList.add('has-heat');
+    body.appendChild(strip);
   }
-
-  const body = document.createElement('div');
-  body.className = 'msg-body';
 
   if (msg.transcriptStatus === 'pending') {
     body.innerHTML = '<span class="muted">Transcribing…</span>';
@@ -3926,6 +3955,7 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.e = w.e;
       span.textContent = w.w;
       if (expr && state.expr === 'text') span.style.setProperty('--wc', exprColor(expr[wi]));
+      if (expr && state.expr === 'highlight') span.style.setProperty('--hc', exprColor(expr[wi]));
       span.onclick = () => tapTranscript(msg.id, w.s + 0.001);
       frag.appendChild(span);
       frag.appendChild(document.createTextNode(' '));
