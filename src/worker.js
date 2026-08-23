@@ -930,12 +930,8 @@ export default {
 
         if (action === '' && request.method === 'POST') {
           const { mime } = await request.json();
-          const clean = String(mime || 'video/webm').split(';')[0];
-          const ext = {
-            'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
-            'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/mp4': 'm4a',
-          }[clean] || 'webm';
-          const key = `${slug(16)}.${ext}`;
+          const clean = cleanMime(mime);
+          const key = `${slug(16)}.${MEDIA_EXT[clean]}`;
           const mpu = await env.MEDIA.createMultipartUpload(key, { httpMetadata: { contentType: clean } });
           return json({ key, uploadId: mpu.uploadId });
         }
@@ -981,7 +977,28 @@ export default {
 };
 
 const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced — 10 minutes each
-const UPLOAD_KEY_RE = /^[A-Za-z0-9_-]{16}\.(webm|mp4|mov|wav|m4a)$/;
+const UPLOAD_KEY_RE = /^[A-Za-z0-9_-]{16}\.(webm|mp4|mov|wav|m4a|mp3|ogg|flac|aac)$/;
+
+// every container we'll store: camera/screen video, and audio-only messages
+// (voice clips and uploaded audio files ride the same pipeline — a message's
+// media file just happens to have no picture)
+const MEDIA_EXT = {
+  'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov',
+  'audio/wav': 'wav', 'audio/webm': 'webm', 'audio/mp4': 'm4a', 'audio/mpeg': 'mp3',
+  'audio/ogg': 'ogg', 'audio/flac': 'flac', 'audio/aac': 'aac',
+};
+const MIME_ALIAS = {
+  'audio/x-m4a': 'audio/mp4', 'audio/x-wav': 'audio/wav', 'audio/wave': 'audio/wav',
+  'audio/mp3': 'audio/mpeg', 'audio/x-flac': 'audio/flac', 'audio/x-aac': 'audio/aac',
+  'video/x-m4v': 'video/mp4',
+};
+// bare, canonical mime — unknown types fall back to webm of the right kind
+function cleanMime(mime) {
+  let c = String(mime || 'video/webm').split(';')[0].trim().toLowerCase();
+  c = MIME_ALIAS[c] || c;
+  if (MEDIA_EXT[c]) return c;
+  return c.startsWith('audio/') ? 'audio/webm' : 'video/webm';
+}
 
 // chunked-upload routes share the message-posting gate: signed-in, not
 // blocked, commenter or better in this chat (name-only mode stays open)
@@ -1081,7 +1098,7 @@ async function createMessage(request, env, ctx, chatId) {
     layer = null; // layers need accounts — name-only mode has none
   }
 
-  const extFor = mm => ({ 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov' }[mm] || 'webm');
+  const extFor = mm => MEDIA_EXT[mm];
 
   // preferred path: the client already chunk-uploaded the big files to R2
   // and hands us their keys; fallback: small inline files (legacy/dev)
@@ -1092,7 +1109,7 @@ async function createMessage(request, env, ctx, chatId) {
     mime = preVideo.mime;
   } else {
     if (!(video instanceof File)) return json({ error: 'missing video' }, 400);
-    mime = (video.type || 'video/webm').split(';')[0];
+    mime = cleanMime(video.type);
     videoKey = `${slug(16)}.${extFor(mime)}`;
     await env.MEDIA.put(videoKey, video.stream(), { httpMetadata: { contentType: mime } });
   }
@@ -1104,7 +1121,7 @@ async function createMessage(request, env, ctx, chatId) {
   } else {
     const screen = form.get('screen');
     if (screen instanceof File && screen.size > 0) {
-      const smime = (screen.type || 'video/webm').split(';')[0];
+      const smime = cleanMime(screen.type);
       screenKey = `${slug(16)}.${extFor(smime)}`;
       await env.MEDIA.put(screenKey, screen.stream(), { httpMetadata: { contentType: smime } });
     }
@@ -1140,6 +1157,11 @@ async function createMessage(request, env, ctx, chatId) {
     await env.MEDIA.put(audioKey, transcriptBuf, { httpMetadata: { contentType: amime } });
   } else if (video instanceof File) {
     transcriptBuf = await video.arrayBuffer(); // legacy/dev inline path
+  } else if (!form.get('chunkedTranscript') && mime.startsWith('audio/')) {
+    // voice-only clip: the media file IS the voice track — no second copy
+    // needed, transcribe (and later retranscribe) straight from it
+    const obj = await env.MEDIA.get(videoKey);
+    if (obj && obj.size <= 24 * 1024 * 1024) transcriptBuf = await obj.arrayBuffer();
   }
 
   await env.DB.prepare(

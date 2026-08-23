@@ -50,6 +50,9 @@ const state = {
   silMin: (v => Number.isFinite(v) ? v : 0.25)(parseFloat(localStorage.getItem('splitty:silmin'))),
   // hide your own floating preview while watching (camera stays on)
   selfHide: localStorage.getItem('splitty:selfhide') === '1',
+  // voice-only: no camera at all — clips are audio files, the box shows a
+  // visualizer instead of your face
+  voiceOnly: localStorage.getItem('splitty:voiceonly') === '1',
 };
 
 // Editors flip through comment layers with the picker; everyone else just
@@ -107,6 +110,7 @@ const players = [$('#player-a'), $('#player-b')];
 const preview = $('#preview');
 const activeEl = () => players[state.activeIdx];
 const standbyEl = () => players[state.activeIdx ^ 1];
+const isAudioMsg = msg => !!msg && (msg.mime || '').startsWith('audio/');
 const mediaUrl = msg => {
   const b = blobStore.get(msg.file);
   if (b) { b.last = ++blobTick; return b.url; }
@@ -379,29 +383,81 @@ function paintScreenBtn() {
     ? 'Screen sharing is on — recordings include it. Tap to turn off.'
     : 'Share your screen — while it\'s on, recordings include it';
 }
+// does the live stream carry a picture? (voice-only mode opens the mic alone)
+const camHasVideo = () => !!camStream?.getVideoTracks().some(t => t.readyState === 'live');
+
+let camPending = null; // in-flight getUserMedia — callers share it
 async function ensureCam() {
   if (camStream && camStream.active) return camStream;
+  if (camPending) return camPending;
   // saved device choices ride along as 'ideal' — a missing device (unplugged
   // webcam, other machine) falls back instead of failing
   const camId = localStorage.getItem('splitty:camid');
   const micId = localStorage.getItem('splitty:micid');
+  const wantVideo = !state.voiceOnly;
+  let stream;
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: { ideal: 960 }, ...(camId && { deviceId: { ideal: camId } }) },
+    camPending = navigator.mediaDevices.getUserMedia({
+      video: wantVideo
+        ? { facingMode: 'user', width: { ideal: 960 }, ...(camId && { deviceId: { ideal: camId } }) }
+        : false,
       audio: micId ? { deviceId: { ideal: micId } } : true,
     });
+    stream = await camPending;
   } catch (err) {
+    camPending = null;
     camError = err;
     $('#cam-enable')?.classList.remove('hidden');
     updateStage();
     throw err;
   }
+  camPending = null;
+  if (wantVideo === state.voiceOnly) {
+    // the camera toggle flipped while the permission prompt was up — what
+    // we got is the wrong shape; ask again
+    stream.getTracks().forEach(t => t.stop());
+    return ensureCam();
+  }
+  camStream = stream;
   camError = null;
   $('#cam-enable')?.classList.add('hidden');
-  preview.srcObject = camStream;
-  preview.play();
+  if (camHasVideo()) {
+    preview.srcObject = camStream;
+    preview.play();
+  } else {
+    preview.srcObject = null;
+  }
+  listenToMic(camStream); // the visualizer follows whichever mic is live
   updateStage();
   return camStream;
+}
+
+// camera on/off is a mode like screen sharing: it persists across clips and
+// re-opens the devices with or without a picture
+async function toggleVoiceOnly() {
+  if (state.rec) return showToast('Finish this clip first — then switch the camera on or off');
+  state.voiceOnly = !state.voiceOnly;
+  localStorage.setItem('splitty:voiceonly', state.voiceOnly ? '1' : '0');
+  paintCamBtn();
+  if (camPending) return; // ensureCam re-asks on its own once this lands
+  if (camStream || camError) {
+    camStream?.getTracks().forEach(t => t.stop());
+    camStream = null;
+    try {
+      await ensureCam();
+    } catch {
+      showToast(state.voiceOnly ? "Couldn't open the microphone" : "Couldn't open the camera");
+    }
+  }
+  updateStage();
+}
+
+function paintCamBtn() {
+  const btn = $('#cam-btn');
+  btn.classList.toggle('cam-off', state.voiceOnly);
+  btn.title = state.voiceOnly
+    ? 'Camera is off — clips are voice only. Tap to turn it on.'
+    : 'Turn the camera off — record voice only';
 }
 
 // ---------- device picker ----------
@@ -475,8 +531,9 @@ function initMenu() {
   } else {
     $('#menu-devices').classList.add('hidden');
   }
-  // post an existing video file as a message — spliced at the playhead when
-  // something's playing, exactly like recording (frozen at the moment of intent)
+  // post an existing video or audio file as a message — spliced at the
+  // playhead when something's playing, exactly like recording (frozen at the
+  // moment of intent)
   $('#upload-btn').onclick = () => {
     if (!canRecordHere()) return showToast("You don't have permission to post here");
     state._uploadAnchor = state.playing && state.playIdx >= 0
@@ -579,7 +636,9 @@ function armCamRetry() {
   const retry = () =>
     ensureCam().catch(err => {
       if (err.name === 'NotAllowedError') {
-        showToast('Camera blocked — allow it via the camera icon in the address bar');
+        showToast(state.voiceOnly
+          ? 'Microphone blocked — allow it via the icon in the address bar'
+          : 'Camera blocked — allow it via the camera icon in the address bar');
       }
     });
   document.addEventListener('pointerdown', retry, { once: true });
@@ -808,6 +867,9 @@ function initChat() {
   initMenu();
   initTimeline();
   restorePendingUploads();
+  $('#cam-btn').onclick = toggleVoiceOnly;
+  $('#nocam-btn').onclick = toggleVoiceOnly;
+  paintCamBtn();
 
   // layer picker popover: type-ahead over commenters, anchored to its button
   $('#layer-pick').onclick = () => {
@@ -828,8 +890,8 @@ function initChat() {
     if (!pop.contains(e.target) && !$('#layer-pick').contains(e.target)) pop.classList.add('hidden');
   });
 
-  // drop a video file anywhere on the transcript to post it (splices at the
-  // playhead when something's playing, same as the upload button)
+  // drop a video or audio file anywhere on the transcript to post it (splices
+  // at the playhead when something's playing, same as the upload button)
   const msgsEl = $('#messages');
   for (const ev of ['dragover', 'dragenter']) {
     msgsEl.addEventListener(ev, e => {
@@ -844,8 +906,8 @@ function initChat() {
   msgsEl.addEventListener('drop', e => {
     e.preventDefault();
     msgsEl.classList.remove('drop-hot');
-    const f = [...e.dataTransfer.files].find(ff => ff.type.startsWith('video/'));
-    if (!f) return showToast('Drop a video file');
+    const f = [...e.dataTransfer.files].find(ff => mediaKind(ff));
+    if (!f) return showToast('Drop a video or audio file');
     if (!canRecordHere()) return showToast("You don't have permission to post here");
     state._uploadAnchor = state.playing && state.playIdx >= 0
       ? { parentId: state.playlist[state.playIdx].id, anchorMs: Math.floor(activeEl().currentTime * 1000) }
@@ -2345,12 +2407,19 @@ async function toggleRecord() {
     .find(m => MediaRecorder.isTypeSupported(m)) || '';
 
   // record video + a small audio-only track (the audio is what gets transcribed);
-  // capped bitrate keeps uploads fast
-  const recorder = new MediaRecorder(stream, {
-    ...(videoMime && { mimeType: videoMime }),
-    videoBitsPerSecond: CAM_BITRATE,
-  });
-  const audioRecorder = new MediaRecorder(
+  // capped bitrate keeps uploads fast. Voice-only: one audio recorder — its
+  // file is the message, and the server transcribes it directly.
+  const voice = !camHasVideo();
+  const recorder = voice
+    ? new MediaRecorder(
+        new MediaStream(stream.getAudioTracks()),
+        { ...(audioMime && { mimeType: audioMime }), audioBitsPerSecond: 96000 }
+      )
+    : new MediaRecorder(stream, {
+        ...(videoMime && { mimeType: videoMime }),
+        videoBitsPerSecond: CAM_BITRATE,
+      });
+  const audioRecorder = voice ? null : new MediaRecorder(
     new MediaStream(stream.getAudioTracks()),
     { ...(audioMime && { mimeType: audioMime }), audioBitsPerSecond: 64000 }
   );
@@ -2367,9 +2436,9 @@ async function toggleRecord() {
 
   const vChunks = [], aChunks = [];
   recorder.ondataavailable = e => e.data.size && vChunks.push(e.data);
-  audioRecorder.ondataavailable = e => e.data.size && aChunks.push(e.data);
+  if (audioRecorder) audioRecorder.ondataavailable = e => e.data.size && aChunks.push(e.data);
   let stoppedCount = 0;
-  const stopTarget = screenRecorder ? 3 : 2;
+  const stopTarget = 1 + (audioRecorder ? 1 : 0) + (screenRecorder ? 1 : 0);
   const onStop = () => {
     if (++stoppedCount < stopTarget) return;
     const rec = state.rec;
@@ -2384,8 +2453,8 @@ async function toggleRecord() {
       return;
     }
     enqueueUpload({
-      videoBlob: new Blob(vChunks, { type: recorder.mimeType }),
-      audioBlob: new Blob(aChunks, { type: audioRecorder.mimeType }),
+      videoBlob: new Blob(vChunks, { type: recorder.mimeType || (voice ? 'audio/webm' : 'video/webm') }),
+      audioBlob: audioRecorder ? new Blob(aChunks, { type: audioRecorder.mimeType }) : null,
       screenBlob: sChunks.length ? new Blob(sChunks, { type: screenRecorder.mimeType }) : null,
       rec,
       durationMs,
@@ -2402,7 +2471,7 @@ async function toggleRecord() {
     updateHint();
   };
   recorder.onstop = onStop;
-  audioRecorder.onstop = onStop;
+  if (audioRecorder) audioRecorder.onstop = onStop;
   if (screenRecorder) screenRecorder.onstop = onStop;
 
   $('#rec-btn').classList.add('recording');
@@ -2415,7 +2484,7 @@ async function toggleRecord() {
   const recLayer = canEdit() ? state.layer : canComment() ? '' : (state.auth?.user?.id || '');
   state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume, layer: recLayer };
   recorder.start();
-  audioRecorder.start();
+  audioRecorder?.start();
   screenRecorder?.start();
   updateStage();
   updateHint();
@@ -2426,7 +2495,7 @@ function stopRecord() {
   if (!rec) return;
   if (Date.now() - rec.startTs < 700) rec.discard = true;
   rec.recorder.stop(); // the upload fires once every recorder has stopped
-  rec.audioRecorder.stop();
+  rec.audioRecorder?.stop();
   rec.screenRecorder?.stop();
   // camera and screen streams stay live — camera is the always-on preview,
   // and screen sharing is a mode that persists across clips until toggled off
@@ -2545,6 +2614,10 @@ async function uploadJob(job) {
     uploader.progress = Math.min(99, Math.max(1, Math.round((sent / total) * 100)));
     updateHint();
   };
+  // voice clip: the media file is the voice track — the server transcribes
+  // it in place; loudness is measured here, alongside the upload
+  const voiceGain = !job.audioBlob && !job.audioPromise && videoBlob.type.startsWith('audio/')
+    ? measureGain(videoBlob) : null;
   if (!job.videoKey) job.videoKey = await chunkUpload(videoBlob, onBytes);
   if (screenBlob && screenBlob.size && !job.screenKey) job.screenKey = await chunkUpload(screenBlob, onBytes);
 
@@ -2577,6 +2650,8 @@ async function uploadJob(job) {
   } else if (job.chunks) {
     fd.append('chunkedTranscript', '1');
     if (pcmGain != null) fd.append('gain', String(pcmGain));
+  } else if (voiceGain) {
+    fd.append('gain', String(await voiceGain));
   }
   fd.append('author', state.name || 'anon');
   fd.append('durationMs', String(job.durationMs));
@@ -2648,11 +2723,11 @@ async function harvestAndRetranscribe(msg, btn) {
   }
 }
 
-// ---------- video file upload ----------
-// Post an existing video file as a message: extract its audio track in the
-// browser (for transcription + loudness), then ride the normal pipeline —
-// chunked upload, ghost card, layer routing, the works.
-// decode the audio track out of a video file → mono PCM (WAV built as needed)
+// ---------- video / audio file upload ----------
+// Post an existing video or audio file as a message: extract its audio track
+// in the browser (for transcription + loudness), then ride the normal
+// pipeline — chunked upload, ghost card, layer routing, the works.
+// decode the audio track out of a media file → mono PCM (WAV built as needed)
 async function extractAudio(file) {
   const ctx = new OfflineAudioContext(1, 1, 16000);
   const decoded = await ctx.decodeAudioData(await file.arrayBuffer());
@@ -2746,10 +2821,27 @@ const videoDurationMs = file => new Promise(res => {
   v.src = URL.createObjectURL(file);
 });
 
+// 'video' | 'audio' | null — by declared type, else by extension (some OSes
+// hand over .m4a/.opus files with no type at all)
+const EXT_MIME = {
+  mp3: 'audio/mpeg', m4a: 'audio/mp4', wav: 'audio/wav', ogg: 'audio/ogg', oga: 'audio/ogg',
+  opus: 'audio/ogg', flac: 'audio/flac', aac: 'audio/aac', weba: 'audio/webm',
+  mp4: 'video/mp4', m4v: 'video/mp4', mov: 'video/quicktime', webm: 'video/webm',
+};
+const fileMime = f => {
+  const t = (f.type || '').split(';')[0];
+  if (/^(video|audio)\//.test(t)) return t;
+  return EXT_MIME[(f.name || '').split('.').pop().toLowerCase()] || '';
+};
+const mediaKind = f => (fileMime(f).split('/')[0] || null);
+
 async function uploadVideoFile(file) {
   if (!file) return;
-  if (!file.type.startsWith('video/')) return showToast("That doesn't look like a video file");
+  const kind = mediaKind(file);
+  if (!kind) return showToast("That doesn't look like a video or audio file");
   if (file.size > 800 * 1024 * 1024) return showToast('That file is too large — try under 800MB');
+  // a typeless file gets its sniffed mime so the server stores the right kind
+  if (file.type !== fileMime(file)) file = new File([file], file.name, { type: fileMime(file) });
 
   // audio decode is CPU-bound, upload is network-bound: run them in
   // parallel. The upload starts immediately; the message POST at the end
@@ -2757,7 +2849,7 @@ async function uploadVideoFile(file) {
   const audioPromise = extractAudio(file).catch(() => null);
   const durationMs = await videoDurationMs(file); // instant — metadata only
   if (durationMs && durationMs > MAX_RECORD_MS + 30_000 && !canEdit()) {
-    return showToast('Clips are capped at 10 minutes — editors can post longer videos');
+    return showToast('Clips are capped at 10 minutes — editors can post longer files');
   }
 
   const recLayer = canEdit() ? state.layer : canComment() ? '' : (state.auth?.user?.id || '');
@@ -2833,8 +2925,9 @@ async function restorePendingUploads() {
       jid: r.id,
       videoBlob: r.videoBlob, audioBlob: r.audioBlob, screenBlob: r.screenBlob,
       durationMs: r.durationMs,
-      // a recovered file upload without its audio re-extracts from the video
-      audioPromise: !r.audioBlob && r.videoBlob?.type?.startsWith('video/')
+      // a recovered upload without its audio re-extracts from the media file
+      // (video, audio file, or voice clip alike — long ones chunk as usual)
+      audioPromise: !r.audioBlob && /^(video|audio)\//.test(r.videoBlob?.type || '')
         ? extractAudio(r.videoBlob).catch(() => null)
         : null,
       rec: { parentId: r.parentId, anchorMs: r.anchorMs, resume: null, layer: r.layer || '' },
@@ -2873,7 +2966,9 @@ function updateHint(text) {
   if (text == null && state.rec) {
     const elapsed = Date.now() - state.rec.startTs;
     const s = Math.floor(elapsed / 1000);
-    const what = state.rec.screenRecorder ? 'Recording you + screen' : 'Recording';
+    const what = state.rec.screenRecorder
+      ? (state.rec.audioRecorder ? 'Recording you + screen' : 'Recording voice + screen')
+      : state.rec.audioRecorder ? 'Recording' : 'Recording voice';
     text = `● ${what} ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} — tap to send`;
     const left = MAX_RECORD_MS - elapsed;
     if (left < 60_000) text += ` · ${Math.max(Math.ceil(left / 1000), 0)}s left`;
@@ -3012,6 +3107,185 @@ function setScreenLayout(layout) {
   updateStage();
 }
 
+// ---------- voice visualizer ----------
+// Voice-only has no picture, so the box gets one: a few translucent ribbons
+// that undulate with the sound, each riding its own frequency band, hues
+// drifting over time. Sources: the live mic (idle/recording) through its own
+// little analyser context; a playing audio message through a tap on its
+// WebAudio gain node when the chain is wired, otherwise a synthetic pulse
+// driven by the transcript's word timing (so phones, where the chain is off
+// for latency, still get motion that follows the speech).
+let vizCtx = null, micAnalyser = null, micSrc = null;
+function listenToMic(stream) {
+  try {
+    if (!stream.getAudioTracks().length) return;
+    if (!vizCtx) {
+      vizCtx = new (window.AudioContext || window.webkitAudioContext)();
+      document.addEventListener('pointerdown', () => {
+        if (vizCtx.state === 'suspended') vizCtx.resume();
+      }, { capture: true });
+    }
+    micSrc?.disconnect();
+    micSrc = vizCtx.createMediaStreamSource(stream);
+    if (!micAnalyser) {
+      micAnalyser = vizCtx.createAnalyser();
+      micAnalyser.fftSize = 256;
+      micAnalyser.smoothingTimeConstant = 0.7;
+    }
+    micSrc.connect(micAnalyser); // analysis only — never routed to the speakers
+    if (vizCtx.state === 'suspended') vizCtx.resume();
+  } catch { /* no WebAudio — the ribbons just drift */ }
+}
+
+function playbackAnalyser(el) {
+  if (!el._gainNode || !audioCtx) return null;
+  if (!el._analyser) {
+    el._analyser = audioCtx.createAnalyser();
+    el._analyser.fftSize = 256;
+    el._analyser.smoothingTimeConstant = 0.7;
+    el._gainNode.connect(el._analyser); // side tap off the leveled signal
+  }
+  return el._analyser;
+}
+
+const VIZ_BANDS = [[0, 2], [2, 4], [4, 7], [7, 12], [12, 20], [20, 40]]; // fft bins, speech-weighted
+const viz = {
+  el: null, ctx2d: null, raf: 0, mode: 'mic',
+  bands: new Float32Array(VIZ_BANDS.length), smooth: new Float32Array(VIZ_BANDS.length),
+  freq: new Uint8Array(128), syn: 0, t0: performance.now(),
+};
+
+function readBands(an, out) {
+  an.getByteFrequencyData(viz.freq);
+  VIZ_BANDS.forEach(([a, b], i) => {
+    let sum = 0;
+    for (let k = a; k < b; k++) sum += viz.freq[k];
+    out[i] = Math.min(1, (sum / (b - a) / 255) * 1.4);
+  });
+}
+
+// no analyser on the playing clip: pulse with the words being spoken
+function syntheticBands(out, t) {
+  const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
+  const msg = seg && state.byId.get(seg.id);
+  const el = activeEl();
+  let speaking = false;
+  if (msg && !el.paused) {
+    const ct = el.currentTime - state.wordLag;
+    for (const w of msg.words) {
+      if (w.s > ct) break;
+      if (ct <= w.e + 0.08) { speaking = true; break; }
+    }
+  }
+  const target = el.paused ? 0.04 : speaking ? 0.75 : 0.14;
+  viz.syn += (target - viz.syn) * 0.18;
+  for (let i = 0; i < out.length; i++) {
+    const wob = 0.65 + 0.35 * Math.sin(t * (2.1 + i * 0.9) + i * 1.7) * Math.sin(t * 5.3 + i);
+    out[i] = viz.syn * wob * (i < 3 ? 1 : 0.6);
+  }
+}
+
+function showViz(on, mode = viz.mode) {
+  if (!viz.el) { viz.el = $('#viz'); viz.ctx2d = viz.el.getContext('2d'); }
+  viz.mode = mode;
+  viz.el.classList.toggle('hidden', !on);
+  if (on && !viz.raf) viz.raf = requestAnimationFrame(vizFrame);
+}
+
+function vizFrame(now) {
+  if (viz.el.classList.contains('hidden') || document.hidden) { viz.raf = 0; return; }
+  viz.raf = requestAnimationFrame(vizFrame);
+  const t = (now - viz.t0) / 1000;
+  // size to the box (device pixels, capped — it's a glow, not text)
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = Math.round(viz.el.clientWidth * dpr), H = Math.round(viz.el.clientHeight * dpr);
+  if (!W || !H) return;
+  if (viz.el.width !== W || viz.el.height !== H) { viz.el.width = W; viz.el.height = H; }
+
+  const an = viz.mode === 'play' ? playbackAnalyser(activeEl()) : micAnalyser;
+  if (an) readBands(an, viz.bands);
+  else if (viz.mode === 'play') syntheticBands(viz.bands, t);
+  else viz.bands.fill(0.06);
+  for (let i = 0; i < viz.bands.length; i++) {
+    const d = viz.bands[i] - viz.smooth[i];
+    viz.smooth[i] += d * (d > 0 ? 0.45 : 0.1); // quick to rise, slow to settle
+  }
+  drawViz(viz.ctx2d, W, H, t, viz.smooth);
+}
+
+function drawViz(c, W, H, t, b) {
+  const energy = (b[0] + b[1] + b[2] + b[3]) / 4;
+  c.globalCompositeOperation = 'source-over';
+  const bg = c.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0b0d18');
+  bg.addColorStop(1, '#05060b');
+  c.fillStyle = bg;
+  c.fillRect(0, 0, W, H);
+  c.globalCompositeOperation = 'lighter'; // ribbons add up into glow where they cross
+
+  // one hue at a time, drifting slowly around the wheel; the ribbons are its
+  // gradient — the lowest frequency band is the darkest, the highest the
+  // lightest — so the picture reads as a single color breathing
+  const hue = (t * 3) % 360; // ~2 minutes around the wheel
+  const N = 6, step = Math.max(3, Math.round(W / 160));
+  const scale = W / 800 + 0.6;
+  for (let r = 0; r < N; r++) {
+    const level = b[r % b.length];
+    const shade = r / (N - 1);          // 0 = bass (dark) … 1 = treble (light)
+    const light = 30 + 48 * shade;      // body lightness
+    const flip = r % 2 ? -1 : 1;        // alternate ribbons crest from above and below
+    const amp = H * (0.05 + 0.3 * level);
+    const yc = H * (0.5 + 0.1 * Math.sin(t * 0.35 + r * 1.3));
+    const crest = [];
+    for (let x = 0; x <= W + step; x += step) {
+      const u = x / W;
+      crest.push(yc + flip * (
+        Math.sin(u * (2.5 + r * 0.8) * Math.PI + t * (0.8 + r * 0.22)) * amp
+        + Math.sin(u * (6 + r * 1.6) * Math.PI - t * (1.6 + r * 0.3)) * amp * 0.35
+        + Math.sin(u * 1.3 * Math.PI + t * 0.45 + r) * H * 0.04
+      ));
+    }
+    // body: fades from the crest toward the edge it grows from
+    const edge = flip > 0 ? H : 0;
+    c.beginPath();
+    c.moveTo(0, edge);
+    crest.forEach((y, i) => c.lineTo(i * step, y));
+    c.lineTo((crest.length - 1) * step, edge);
+    c.closePath();
+    const fg = c.createLinearGradient(0, yc - flip * amp, 0, edge);
+    fg.addColorStop(0, `hsla(${hue}, 90%, ${light}%, ${0.22 + 0.3 * level})`);
+    fg.addColorStop(0.6, `hsla(${hue}, 90%, ${light - 10}%, ${0.05 + 0.1 * level})`);
+    fg.addColorStop(1, `hsla(${hue}, 90%, ${light - 20}%, 0)`);
+    c.fillStyle = fg;
+    c.fill();
+    // crest: a wide soft halo under a thin line, both a step lighter than the body
+    c.beginPath();
+    crest.forEach((y, i) => (i ? c.lineTo(i * step, y) : c.moveTo(0, y)));
+    c.strokeStyle = `hsla(${hue}, 90%, ${light + 8}%, ${0.12 + 0.3 * level})`;
+    c.lineWidth = (6 + 10 * level) * scale;
+    c.stroke();
+    c.strokeStyle = `hsla(${hue}, 90%, ${light + 18}%, ${0.3 + 0.45 * level})`;
+    c.lineWidth = (1.2 + 1.8 * level) * scale;
+    c.stroke();
+  }
+  // a soft core that swells with the voice — the lightest tint of the same hue
+  const rad = Math.min(W, H) * (0.18 + 0.32 * energy);
+  const og = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, rad);
+  og.addColorStop(0, `hsla(${hue}, 90%, 88%, ${0.15 + 0.4 * energy})`);
+  og.addColorStop(0.5, `hsla(${hue}, 90%, 70%, ${0.05 + 0.12 * energy})`);
+  og.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
+  c.fillStyle = og;
+  c.fillRect(W / 2 - rad, H / 2 - rad, rad * 2, rad * 2);
+  c.globalCompositeOperation = 'source-over';
+}
+
+// the loop parks itself while the tab is hidden — pick it back up
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && viz.el && !viz.el.classList.contains('hidden') && !viz.raf) {
+    viz.raf = requestAnimationFrame(vizFrame);
+  }
+});
+
 // ---------- stage (video area) ----------
 // modes: record → your camera fills the box; play → their video with your camera
 // as a corner PiP; self → idle, just your camera; none → no camera yet, hide stage
@@ -3034,8 +3308,10 @@ function updateStage() {
     stage.classList.remove('hidden');
     preview.classList.add('hidden');
     players.forEach(p => p.classList.add('hidden'));
+    showViz(false);
     $('#transport').classList.add('hidden');
     $('#pip-label').textContent = '';
+    $('#cam-enable').textContent = state.voiceOnly ? 'Turn on microphone' : 'Turn on camera';
     $('#cam-off').classList.remove('hidden'); // blocked camera: glyph behind the enable button
     return;
   }
@@ -3049,6 +3325,7 @@ function updateStage() {
   const curMsg = seg ? state.byId.get(seg.id) : null;
   const screenPlay = mode === 'play' && !!curMsg?.screenKey && !brokenScreens.has(curMsg.screenKey);
   const screenLive = mode !== 'play' && !!screenStream?.active;
+  const audioPlay = mode === 'play' && isAudioMsg(curMsg); // no picture to show — the visualizer is it
   const sp = screenEl();
   if (screenLive && sp.srcObject !== screenStream) {
     sp.removeAttribute('src');
@@ -3060,10 +3337,10 @@ function updateStage() {
   box.classList.toggle('mode-screen', screenPlay);
   box.classList.toggle('mode-screenlive', screenLive);
   sp.classList.toggle('hidden', !(screenPlay || screenLive));
-  const split = screenPlay && state.screenLayout === 'split';
+  const split = screenPlay && !audioPlay && state.screenLayout === 'split';
   box.classList.toggle('screen-split', split);
   const splitBtn = $('#split-btn');
-  splitBtn.classList.toggle('hidden', !screenPlay);
+  splitBtn.classList.toggle('hidden', !screenPlay || audioPlay); // voice + screen: the screen is the whole picture
   splitBtn.textContent = split ? 'PiP' : 'Split'; // button shows the alternative
   splitBtn.onclick = () => setScreenLayout(split ? 'screen' : 'split');
   // fill/fit per context: the screen-share preference rules while a screen
@@ -3075,7 +3352,7 @@ function updateStage() {
   // which video is the little draggable one (tap it to swap) — none when split
   players.forEach(p => p.classList.remove('spip'));
   sp.classList.remove('spip');
-  if (screenPlay && !split) (state.screenLayout === 'cam' ? sp : activeEl()).classList.add('spip');
+  if (screenPlay && !split && !audioPlay) (state.screenLayout === 'cam' ? sp : activeEl()).classList.add('spip');
 
   // floating-video geometry: sized to each video's real aspect, user-placed
   if (mode === 'play' || screenLive) layoutPip(preview, pips.cam);
@@ -3088,10 +3365,19 @@ function updateStage() {
   // self-view toggle: hides your floating preview while watching, never
   // while recording (there it's the main view, or the proof-of-capture pip)
   const selfIsPip = mode === 'play' || (screenLive && mode !== 'record');
-  $('#self-btn').classList.toggle('hidden', !(camStream && selfIsPip));
+  const hasCam = camHasVideo();
+  $('#self-btn').classList.toggle('hidden', !(hasCam && selfIsPip));
   $('#self-btn').textContent = state.selfHide ? 'Show me' : 'Hide me';
-  preview.classList.toggle('hidden', !camStream || (state.selfHide && selfIsPip));
+  preview.classList.toggle('hidden', !hasCam || (state.selfHide && selfIsPip));
+  // camera on/off lives on your own box while it's the main view
+  const nocam = $('#nocam-btn');
+  nocam.classList.toggle('hidden', mode === 'play' || screenLive || !camStream);
+  nocam.textContent = state.voiceOnly ? 'Camera' : 'No camera';
   if (split) layoutSplit(); // computed rects: aspect-true, sandwiched, centered
+  // the visualizer stands in for a picture: your mic while idle/recording
+  // voice-only, the clip's audio while an audio message plays
+  const vizLive = mode !== 'play' && !!camStream && !hasCam && !screenLive;
+  showViz(vizLive || (audioPlay && !screenPlay), vizLive ? 'mic' : 'play');
   // never a silently empty box: show the camera-off glyph when the stage
   // would be showing your camera but there's no stream
   $('#cam-off').classList.toggle('hidden', !(mode !== 'play' && !camStream && !screenLive));
@@ -3205,8 +3491,8 @@ function render() {
   box.innerHTML = '';
 
   if (!state.messages.length && !pending.length) {
-    box.innerHTML = '<div class="empty">Nothing here yet.<br>Record the first video note.'
-      + (canRecordHere() ? '<br><button id="empty-upload" class="btn-outline">…or click to upload / drop a video here</button>' : '')
+    box.innerHTML = `<div class="empty">Nothing here yet.<br>Record the first ${state.voiceOnly ? 'voice' : 'video'} note.`
+      + (canRecordHere() ? '<br><button id="empty-upload" class="btn-outline">…or click to upload / drop a video or audio file here</button>' : '')
       + '</div>';
     const b = box.querySelector('#empty-upload');
     if (b) b.onclick = () => $('#upload-btn').click(); // same gate + picker as the menu
@@ -3277,6 +3563,7 @@ function renderMessage(msg, depth, unlocked = false) {
     <span class="author"></span>
     <span class="time">${fmtTime(msg.createdAt)}</span>
     <span class="dur">${fmtClock(msgDur(msg))}</span>
+    ${isAudioMsg(msg) ? '<span class="screen-tag" title="Voice only">🎙</span>' : ''}
     ${msg.screenKey ? '<span class="screen-tag" title="Includes a screen share">🖥</span>' : ''}
     ${msg.layer ? '<span class="screen-tag" title="Comment — visible to its author and the editors">💬</span>' : ''}
     ${isNew ? '<span class="badge">new</span>' : ''}

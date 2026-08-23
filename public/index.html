@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=102">
+  <link rel="stylesheet" href="/style.css?v=103">
 </head>
 <body>
 
@@ -25,6 +25,10 @@
       <a href="/" class="logo">splitty</a>
       <div class="header-actions">
         <button id="layer-pick" class="btn-ghost hidden" title="Whose comments you're viewing — recordings go where you're looking"></button>
+        <button id="cam-btn" class="btn-ghost" title="Turn the camera off — record voice only">
+          <svg class="ic ic-cam-on" viewBox="0 0 16 16"><path d="M1.5 3A1.5 1.5 0 0 0 0 4.5v7A1.5 1.5 0 0 0 1.5 13h8a1.5 1.5 0 0 0 1.5-1.5V9.6l3.4 2.1a.7.7 0 0 0 1.1-.6V4.9a.7.7 0 0 0-1.1-.6L11 6.4V4.5A1.5 1.5 0 0 0 9.5 3h-8z"/></svg>
+          <svg class="ic ic-cam-off" viewBox="0 0 16 16"><path d="M1.3 1.3.3 2.3l2 2H1.5A1.5 1.5 0 0 0 0 5.8v6A1.5 1.5 0 0 0 1.5 13.3h8c.3 0 .6-.1.9-.3l3.3 3.3 1-1-13.4-14zM11 7.7v-.9l3.4-2.1a.7.7 0 0 1 1.1.6v6.2a.7.7 0 0 1-1.1.6L11 10.1V7.7zM5.7 4.3h3.8A1.5 1.5 0 0 1 11 5.8v1.4L5.7 4.3z"/></svg>
+        </button>
         <button id="screen-btn" class="btn-ghost hidden" title="Share your screen — while it's on, recordings include it">
           <svg class="ic" viewBox="0 0 16 16"><path d="M1.5 2A1.5 1.5 0 0 0 0 3.5v7A1.5 1.5 0 0 0 1.5 12h4.9l-.37 1.5H4.5a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-1.53L9.6 12h4.9a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 14.5 2h-13z"/></svg>
         </button>
@@ -52,9 +56,9 @@
         <input type="checkbox" id="comp-check"><span>Compressor</span>
       </label>
       <button id="bell-btn" class="menu-row hidden" title="Notifications"></button>
-      <button id="upload-btn" class="menu-row" title="Post an existing video file as a message">Upload a video…</button>
+      <button id="upload-btn" class="menu-row" title="Post an existing video or audio file as a message">Upload a video or audio file…</button>
       <button id="copy-tx-btn" class="menu-row" title="Copy the whole conversation as text — attributed, timestamped, interleaved as it plays">Copy transcript</button>
-      <input type="file" id="upload-input" accept="video/*" class="hidden">
+      <input type="file" id="upload-input" accept="video/*,audio/*,.m4a,.mp3,.wav,.ogg,.opus,.flac,.aac" class="hidden">
       <button id="name-btn" class="menu-row" title="Change your display name"></button>
       <div id="menu-tuning">
         <div class="menu-div"></div>
@@ -121,6 +125,7 @@
         <video id="player-b" playsinline class="hidden"></video>
         <video id="screen-player" playsinline muted class="hidden"></video>
         <video id="preview" playsinline muted class="hidden"></video>
+        <canvas id="viz" class="hidden"></canvas>
         <div id="pip-label"></div>
         <div id="cam-off" class="hidden">
           <svg viewBox="0 0 24 24"><path d="M4.3 3 3 4.3l3 3H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h10c.5 0 .96-.19 1.31-.5l4.39 4.4 1.3-1.3L4.3 3zM16 10.6V9.3l4.4-2.5a.8.8 0 0 1 1.2.7v9a.8.8 0 0 1-1.2.7l-1.9-1.1L16 13.6v-3zM8.83 6H14a2 2 0 0 1 2 2v.17L8.83 6z"/></svg>
@@ -130,6 +135,7 @@
           <button id="fit-btn" title="Toggle fill / fit">Fit</button>
           <button id="split-btn" class="hidden" title="Screen and camera side by side / stacked / picture-in-picture">Split</button>
           <button id="self-btn" class="hidden" title="Hide or show your own camera preview (camera stays on)">Hide me</button>
+          <button id="nocam-btn" class="hidden" title="Record voice only, or turn the camera back on">No camera</button>
         </div>
         <button id="cam-enable" class="hidden">Turn on camera</button>
       </div>
@@ -315,6 +321,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=102"></script>
+  <script src="/app.js?v=103"></script>
 </body>
 </html>

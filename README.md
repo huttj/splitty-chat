@@ -20,7 +20,10 @@ transcript splits and the conversation reads (and plays back) like it happened l
 
 The client records two tracks per note: the full video (stored in R2, served with Range
 support for seeking) and a small audio-only track that gets sent to Workers AI for
-transcription.
+transcription. With the camera off (header toggle), a note is a single audio file — the
+same pipeline, the stored file is just audio and the server transcribes it in place; the
+stage shows a sound-driven visualizer instead of a picture. Uploaded video *and* audio
+files post the same way.
 
 ## Develop
 
