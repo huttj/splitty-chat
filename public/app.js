@@ -2979,24 +2979,30 @@ function rawFor(msg) {
     const voiced = semi.filter(v => v != null);
     pitchMed = voiced.length >= 8 ? median(voiced) : null;
   }
+  // windows are short and triangular (the middle counts most) so a change
+  // shows up AT the word, not smeared across the seconds around it
+  const HALF = 1.25, SWING = 0.75;
   const centers = words.map(w => (w.s + w.e) / 2);
   const v = words.map((w, i) => {
     const c = centers[i];
-    const lo = Math.max(0, c - 2.5), hi = Math.min(dur, c + 2.5);
-    let n = 0, voicedSec = 0;
+    const lo = Math.max(0, c - HALF), hi = Math.min(dur, c + HALF);
+    let n = 0, voicedSec = 0, wsum = 0;
     const starts = [];
     for (let k = 0; k < words.length; k++) {
       if (centers[k] < lo || centers[k] > hi) continue;
-      n++;
+      const wt = 1 - Math.abs(centers[k] - c) / HALF; // triangular weight
+      n += wt;
+      wsum += wt;
       starts.push(words[k].s);
-      voicedSec += Math.min(words[k].e, hi) - Math.max(words[k].s, lo);
+      voicedSec += (Math.min(words[k].e, hi) - Math.max(words[k].s, lo)) * (0.5 + 0.5 * wt);
     }
     const gaps = [];
     for (let k = 1; k < starts.length; k++) gaps.push(starts[k] - starts[k - 1]);
     const gm = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
+    const span = Math.max(hi - lo, 0.5);
     const x = {
-      pace: n / Math.max(hi - lo, 0.5),                       // words per second around here
-      pause: clamp01(1 - voicedSec / Math.max(hi - lo, 0.5)), // fraction of the window that's silence
+      pace: (n * 2) / span,                                   // weighted words per second around here (triangle area = half)
+      pause: clamp01(1 - (voicedSec / 0.75) / span),          // fraction of the window that's silence
       cv: gm > 0 ? stdev(gaps) / gm : 0,                      // rhythm irregularity
       loud: null, pitch: null, loudStd: null, pitchStd: null,
     };
@@ -3006,7 +3012,7 @@ function rawFor(msg) {
       if (wl.length) x.loud = wl.reduce((a, b) => a + b, 0) / wl.length - loudMed;        // dB vs the message's norm
       const ws = semi.slice(wa, wb).filter(y => y != null);
       if (ws.length && pitchMed != null) x.pitch = ws.reduce((a, b) => a + b, 0) / ws.length - pitchMed; // semitones vs norm
-      const a = Math.max(0, Math.floor((c + lag - 1.5) * hz)), b = Math.ceil((c + lag + 1.5) * hz);
+      const a = Math.max(0, Math.floor((c + lag - SWING) * hz)), b = Math.ceil((c + lag + SWING) * hz);
       x.loudStd = stdev(f.loud.slice(a, b).filter(y => y > -50));
       x.pitchStd = stdev(semi.slice(a, b).filter(y => y != null));
     }
@@ -3052,7 +3058,7 @@ function exprFor(msg) {
   };
   const contrast = val => clamp01((val - 0.15) / 0.7); // the middle 70% of the speaker's range spans the palette
   const v = raw.map(x => ({
-    energy: contrast(0.35 * norm(x.pace, 'pace') + 0.35 * norm(x.loud, 'loud') + 0.3 * norm(x.pitch, 'pitch')),
+    energy: contrast(0.3 * norm(x.pace, 'pace') + 0.42 * norm(x.loud, 'loud') + 0.28 * norm(x.pitch, 'pitch')),
     flow: contrast(1 - (0.5 * norm(x.pause, 'pause') + 0.5 * norm(x.cv, 'cv'))),
     tension: contrast(0.5 * norm(x.loudStd, 'loudStd') + 0.5 * norm(x.pitchStd, 'pitchStd')),
   }));
@@ -3731,7 +3737,7 @@ function vizFrame(now) {
     const target = cur && !el.paused ? wordLCHAt(cur, el.currentTime - state.wordLag) : (viz.snap && cur ? wordLCHAt(cur, viz.snap.t) : null);
     if (target) {
       if (!viz.lch || viz.sat < 0.05) viz.lch = target.slice();
-      else for (let i = 0; i < 3; i++) viz.lch[i] += (target[i] - viz.lch[i]) * 0.12;
+      else for (let i = 0; i < 3; i++) viz.lch[i] += (target[i] - viz.lch[i]) * 0.25;
     }
   } else if (micAnalyser) {
     viz.lch = null; // live mic: no words yet — the pitch color
