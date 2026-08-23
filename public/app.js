@@ -3538,9 +3538,29 @@ function readBands(an, out) {
     for (let k = a; k < b; k++) if (liveBins[k] > peak) peak = liveBins[k]; // the band's loudest bin
     out[i] = Math.min(1, peak * 1.25);
   });
+  // resample onto a log-spaced grid, each point the mean of the bins in its
+  // slice — high up, where many bins squeeze into a point, noise averages out
+  const LG = 96, lgLo = Math.log(SPEC_LO), lgSpan = Math.log(SPEC_HI / SPEC_LO);
+  if (!viz.logSpec) viz.logSpec = new Float32Array(LG + 1);
+  for (let i = 0; i <= LG; i++) {
+    const fa = Math.exp(lgLo + lgSpan * ((i - 0.5) / LG)), fb = Math.exp(lgLo + lgSpan * ((i + 0.5) / LG));
+    const a = Math.max(0, Math.floor(fa / binHz)), b = Math.min(nb - 1, Math.max(a + 1, Math.ceil(fb / binHz)));
+    let sum = 0;
+    for (let k = a; k < b; k++) sum += liveBins[k];
+    viz.logSpec[i] = sum / (b - a);
+  }
+  for (let pass = 0; pass < 2; pass++) { // a little smoothing along the line
+    let prev = viz.logSpec[0];
+    for (let i = 1; i < LG; i++) {
+      const cur = viz.logSpec[i];
+      viz.logSpec[i] = prev * 0.25 + cur * 0.5 + viz.logSpec[i + 1] * 0.25;
+      prev = cur;
+    }
+  }
   viz.specAt = hz => {
-    const u = hz / binHz, k = Math.min(nb - 2, Math.max(0, Math.floor(u))), f = Math.min(1, u - k);
-    return liveBins[k] * (1 - f) + liveBins[k + 1] * f;
+    const u = ((Math.log(Math.max(hz, SPEC_LO)) - lgLo) / lgSpan) * LG;
+    const k = Math.min(LG - 1, Math.max(0, Math.floor(u))), f = Math.min(1, Math.max(0, u - k));
+    return viz.logSpec[k] * (1 - f) + viz.logSpec[k + 1] * f;
   };
   // pitch every other frame (it's the costly read; every fourth in simple mode);
   // hold through unvoiced stretches
@@ -3660,56 +3680,74 @@ function drawViz(c, W, H, energy) {
   const hue = viz.hue ?? 0;
   const sat = Math.round(85 * viz.sat); // white at rest, the voice's color when it speaks
   const scale = W / 800 + 0.6;
-  const mid = H / 2, span = H * 0.42, half = W / 2;
+  const mid = H / 2, span = H * 0.4, half = W / 2;
   const at = viz.specAt;
   const simple = state.vizMode === 'simple';
-  // a line is a slice of the spectrum, low edge at the center of the box and
-  // high edge at the right, mirrored to the left — and mirrored again below
-  // the midline, so the same shape reads top and bottom. Each line is the
-  // true shape of its own piece of the sound.
-  const lens = (lo, hi, pts, weight) => {
-    const ys = [];
-    for (let k = 0; k <= pts; k++) {
-      const hz = lo * Math.pow(hi / lo, k / pts);
-      ys.push((at ? Math.min(1, at(hz) * 1.25) : 0) * span * weight);
-    }
-    c.beginPath();
-    for (const flip of [-1, 1]) {
-      for (let k = pts; k >= 0; k--) { const x = half - (k / pts) * half; k === pts ? c.moveTo(x, mid + flip * ys[k]) : c.lineTo(x, mid + flip * ys[k]); }
-      for (let k = 1; k <= pts; k++) c.lineTo(half + (k / pts) * half, mid + flip * ys[k]);
+  // one line: the whole voice spectrum, bass at the center of the box rising
+  // to treble at the right edge, mirrored to the left. Its color runs dark at
+  // the center to light at the edges (bass → treble), and it casts a fainter
+  // reflection below the midline.
+  const PTS = 64, lo = VIZ_BANDS[0][0], hi = VIZ_BANDS[VIZ_N - 1][1];
+  const ys = [];
+  for (let k = 0; k <= PTS; k++) {
+    const hz = lo * Math.pow(hi / lo, k / PTS);
+    ys.push((at ? Math.min(1, at(hz) * 1.25) : 0) * span);
+  }
+  // one smooth curve through the points: left edge (treble) → center (bass) → right edge
+  const trace = flip => {
+    const xs = [], yy = [];
+    for (let k = PTS; k >= 0; k--) { xs.push(half - (k / PTS) * half); yy.push(mid + flip * ys[k]); }
+    for (let k = 1; k <= PTS; k++) { xs.push(half + (k / PTS) * half); yy.push(mid + flip * ys[k]); }
+    c.moveTo(xs[0], yy[0]);
+    const n = xs.length;
+    for (let i = 0; i < n - 1; i++) {
+      const p0 = yy[Math.max(i - 1, 0)], p1 = yy[i], p2 = yy[i + 1], p3 = yy[Math.min(i + 2, n - 1)];
+      const dx = (xs[i + 1] - xs[i]) / 3;
+      c.bezierCurveTo(xs[i] + dx, p1 + (p2 - p0) / 6, xs[i + 1] - dx, p2 - (p3 - p1) / 6, xs[i + 1], p2);
     }
   };
+  const level = energy;
+  const dark = 34 * viz.sat + 60 * (1 - viz.sat), light = 80 * viz.sat + 92 * (1 - viz.sat);
+  const grad = alpha => {
+    const g = c.createLinearGradient(0, 0, W, 0);
+    g.addColorStop(0, `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`);
+    g.addColorStop(0.5, `hsla(${hue}, ${sat}%, ${dark}%, ${alpha})`);
+    g.addColorStop(1, `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`);
+    return g;
+  };
   c.lineJoin = 'round';
-  if (simple) {
-    // one line over the whole voice range, no blur — cheap enough for any phone
-    const level = energy;
-    const light = 62 * viz.sat + 80 * (1 - viz.sat);
-    lens(VIZ_BANDS[0][0], VIZ_BANDS[VIZ_N - 1][1], 48, 1);
-    c.strokeStyle = `hsla(${hue}, ${sat}%, ${light}%, ${0.55 + 0.45 * level})`;
-    c.lineWidth = 1.6 * scale;
+  if (!simple) {
+    // body: a wash from the line down to the midline
+    c.beginPath();
+    trace(-1);
+    c.lineTo(W, mid); c.lineTo(0, mid); c.closePath();
+    const fg = c.createLinearGradient(0, mid - span, 0, mid);
+    fg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark + 20}%, ${0.05 + 0.16 * level})`);
+    fg.addColorStop(1, `hsla(${hue}, ${sat}%, ${dark}%, 0)`);
+    c.fillStyle = fg;
+    c.fill();
+    // reflection: the same line below, fainter, no glow
+    c.beginPath();
+    trace(1);
+    c.strokeStyle = grad(0.12 + 0.18 * level);
+    c.lineWidth = 1.2 * scale;
     c.stroke();
-  } else {
-    for (let r = 0; r < VIZ_N; r++) {
-      const level = viz.smooth[r];
-      const [lo, hi] = VIZ_BANDS[r];
-      const shade = r / (VIZ_N - 1);      // 0 = bass (dark) … 1 = treble (light)
-      const light = (30 + 48 * shade) * viz.sat + (58 + 30 * shade) * (1 - viz.sat);
-      lens(lo, hi, VIZ_PTS, r < 2 ? 1 : 0.85);
-      // thin, with a real neon blur — width never changes with volume
-      c.shadowColor = `hsla(${hue}, ${sat}%, ${light + 10}%, ${0.4 + 0.6 * level})`;
-      c.shadowBlur = 14 * scale;
-      c.strokeStyle = `hsla(${hue}, ${sat}%, ${light + 22}%, ${0.4 + 0.6 * level})`;
-      c.lineWidth = 1.3 * scale;
-      c.stroke();
-      c.shadowBlur = 0;
-    }
+    c.shadowColor = `hsla(${hue}, ${sat}%, ${light}%, ${0.5 + 0.5 * level})`;
+    c.shadowBlur = 16 * scale;
   }
+  // the line itself — thin, its width never changes with volume
+  c.beginPath();
+  trace(-1);
+  c.strokeStyle = grad(simple ? 0.6 + 0.4 * level : 0.55 + 0.45 * level);
+  c.lineWidth = (simple ? 1.6 : 1.5) * scale;
+  c.stroke();
+  c.shadowBlur = 0;
   // a soft core that swells with the voice — the lightest tint of the same hue
   if (simple) { c.globalCompositeOperation = 'source-over'; return; }
   const rad = Math.min(W, H) * (0.18 + 0.32 * energy);
   const og = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, rad);
-  og.addColorStop(0, `hsla(${hue}, ${sat}%, 88%, ${0.35 * energy})`);
-  og.addColorStop(0.5, `hsla(${hue}, ${sat}%, 70%, ${0.1 * energy})`);
+  og.addColorStop(0, `hsla(${hue}, ${sat}%, 88%, ${0.25 * energy})`);
+  og.addColorStop(0.5, `hsla(${hue}, ${sat}%, 70%, ${0.07 * energy})`);
   og.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
   c.fillStyle = og;
   c.fillRect(W / 2 - rad, H / 2 - rad, rad * 2, rad * 2);
