@@ -652,7 +652,11 @@ body.role-viewer #screen-btn, body.role-viewer #cam-btn { display: none; }
   background: var(--panel-2); border: 1px solid #2a2e3a; border-radius: 12px;
   padding: 8px; min-width: 240px; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5);
   display: flex; flex-direction: column; gap: 2px;
+  /* the menu has grown past a phone's height — it scrolls inside itself */
+  max-height: calc(100dvh - 70px - env(safe-area-inset-bottom));
+  overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
+#menu-pop .menu-row, #menu-pop .menu-div, #menu-devices, #menu-tuning { flex-shrink: 0; }
 .menu-row {
   background: none; border: 0; color: var(--text); cursor: pointer;
   text-align: left; font-size: 14px; padding: 9px 10px; border-radius: 8px;
