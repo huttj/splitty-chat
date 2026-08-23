@@ -48,7 +48,8 @@ const state = {
   silPad: (v => Number.isFinite(v) ? v : 0.7)(parseFloat(localStorage.getItem('splitty:silpad'))),
   // minimum silence that must survive the shoulders for a pause to be trimmed
   silMin: (v => Number.isFinite(v) ? v : 0.25)(parseFloat(localStorage.getItem('splitty:silmin'))),
-  // expressiveness display: '' (off) | 'strip' (heat bar per message) | 'text' (colored words)
+  // expressiveness display: any of 'strip' (heat bar per message), 'text'
+  // (colored words), 'highlight' (colored playhead wash) — comma-joined, '' = off
   expr: localStorage.getItem('splitty:expr') || '',
   // visualizer detail: 'full' (six band lines, neon blur) | 'simple' (one line, no blur — phones)
   vizMode: localStorage.getItem('splitty:viz') || (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? 'simple' : 'full'),
@@ -609,18 +610,18 @@ function initMenu() {
     state.vizMode = vz.value;
     localStorage.setItem('splitty:viz', state.vizMode);
   };
-  // expressiveness: how the speech's energy/flow/tension is shown
-  const expr = $('#expr-sel');
-  expr.value = state.expr;
-  const paintExpr = () => document.body.classList.toggle('expr-highlight', state.expr === 'highlight');
+  // expressiveness: how the speech's energy/flow/tension is shown — any mix
+  const exprBoxes = [...document.querySelectorAll('#menu-expr input')];
+  const paintExpr = () => document.body.classList.toggle('expr-highlight', exprOn('highlight'));
+  exprBoxes.forEach(b => (b.checked = exprOn(b.value)));
   paintExpr();
-  expr.onchange = () => {
-    state.expr = expr.value;
+  exprBoxes.forEach(b => (b.onchange = () => {
+    state.expr = exprBoxes.filter(x => x.checked).map(x => x.value).join(',');
     localStorage.setItem('splitty:expr', state.expr);
     paintExpr();
     state.lastRenderKey = '';
     render();
-  };
+  }));
   // a pause this long starts a new paragraph in the transcript
   const par = $('#par-range'), parLabel = $('#par-label');
   const paintPar = () => (parLabel.textContent = `${state.parPause.toFixed(1)}s`);
@@ -2924,6 +2925,7 @@ const stdev = arr => {
   const m = arr.reduce((a, b) => a + b, 0) / arr.length;
   return Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length);
 };
+const exprOn = kind => state.expr.split(',').includes(kind);
 const EXPR_KEYS = ['pace', 'pause', 'cv', 'loud', 'pitch', 'loudStd', 'pitchStd'];
 // a speaker's range never shrinks below these — a monotone speaker stays calm, not noisy
 const EXPR_FLOOR = { pace: 1.2, pause: 0.15, cv: 0.3, loud: 5, pitch: 5, loudStd: 2.5, pitchStd: 3 };
@@ -4165,7 +4167,7 @@ function renderMessage(msg, depth, unlocked = false) {
   // heat strip: the message's timeline down the right edge of its text,
   // painted word by word with its expressiveness color (pauses dark) — drag
   // or tap along it to play from there
-  if (expr && state.expr === 'strip') {
+  if (expr && exprOn('strip')) {
     const dur = msgDur(msg);
     const stops = [];
     let prev = 0;
@@ -4257,8 +4259,8 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.t = w.s;
       span.dataset.e = w.e;
       span.textContent = w.w;
-      if (expr && state.expr === 'text') span.style.setProperty('--wc', exprColor(expr[wi], true));
-      if (expr && state.expr === 'highlight') span.style.setProperty('--hc', exprColor(expr[wi]));
+      if (expr && exprOn('text')) span.style.setProperty('--wc', exprColor(expr[wi], true));
+      if (expr && exprOn('highlight')) span.style.setProperty('--hc', exprColor(expr[wi]));
       span.onclick = () => tapTranscript(msg.id, w.s + 0.001);
       frag.appendChild(span);
       frag.appendChild(document.createTextNode(' '));

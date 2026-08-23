@@ -666,6 +666,9 @@ body.role-viewer #screen-btn, body.role-viewer #cam-btn { display: none; }
 #menu-devices, #menu-tuning { display: flex; flex-direction: column; gap: 8px; padding: 2px 10px 8px; }
 #menu-devices label, #menu-tuning label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
 #menu-tuning input[type=range] { accent-color: var(--accent); }
+#menu-expr { display: flex; flex-direction: column; gap: 6px; }
+#menu-expr .menu-head { font-size: 12px; color: var(--muted); }
+#menu-expr .menu-check { padding: 2px 0; font-size: 13px; }
 #menu-tuning b { color: var(--text); font-variant-numeric: tabular-nums; }
 #menu-devices select, #menu-tuning select {
   background: var(--bg); color: var(--text); border: 1px solid #2e3342;
