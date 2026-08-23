@@ -247,24 +247,33 @@ const IS_MOBILE = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
 const storedComp = localStorage.getItem('splitty:compressor');
 let compressorOn = storedComp === null ? !IS_MOBILE : storedComp === '1';
 let audioCtx = null, compressorIn = null;
+// The WebAudio chain exists when the compressor is on, OR when the full
+// visualizer needs a live analyser on playback. Simple + compressor off is
+// the only chain-free case (direct path: no latency). Once an element is
+// wired it stays wired, so everything plays through the same path.
+const wantChain = () => compressorOn || state.vizMode === 'full';
 function audioChainFor(el) {
-  if (!compressorOn) return null; // direct path: no latency, no leveling
+  if (!wantChain() && !audioCtx) return null;
   try {
     if (!audioCtx) {
       // 'playback' = bigger buffers: mobile underruns (dropouts that sound
       // like skipped words, worst at raised speeds) trade for latency, which
       // the word highlight compensates with the measured value
       audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' });
-      const comp = audioCtx.createDynamicsCompressor();
-      comp.threshold.value = -24;
-      comp.knee.value = 12;
-      comp.ratio.value = 3;
-      comp.attack.value = 0.01;
-      comp.release.value = 0.25;
-      const makeup = audioCtx.createGain();
-      makeup.gain.value = 1.25;
-      comp.connect(makeup).connect(audioCtx.destination);
-      compressorIn = comp;
+      if (compressorOn) {
+        const comp = audioCtx.createDynamicsCompressor();
+        comp.threshold.value = -24;
+        comp.knee.value = 12;
+        comp.ratio.value = 3;
+        comp.attack.value = 0.01;
+        comp.release.value = 0.25;
+        const makeup = audioCtx.createGain();
+        makeup.gain.value = 1.25;
+        comp.connect(makeup).connect(audioCtx.destination);
+        compressorIn = comp;
+      } else {
+        compressorIn = audioCtx.destination; // chain for the analyser only — no compression
+      }
       // autoplay policy can leave the context suspended — a tap wakes it,
       // but only when something is actually playing (a paused context is
       // also the fix for the mobile pause-stutter, so don't undo it)
@@ -613,6 +622,7 @@ function initMenu() {
   vz.onchange = () => {
     state.vizMode = vz.value;
     localStorage.setItem('splitty:viz', state.vizMode);
+    if (state.vizMode === 'full') players.forEach(p => audioChainFor(p)); // full needs the live chain — wire it now
   };
   // expressiveness: how the speech's energy/flow/tension is shown — any mix
   const exprBoxes = [...document.querySelectorAll('#menu-expr input')];
@@ -2885,13 +2895,18 @@ function storedSpecAt(features, t) {
   if (!features?.spec) return null;
   if (!features._spec) features._spec = b64.dec(features.spec);
   const n = features._spec.length / SPEC_N;
-  const i = Math.min(n - 1, Math.max(0, Math.floor(t * features.hz)));
-  const row = features._spec.subarray(i * SPEC_N, (i + 1) * SPEC_N);
+  // between two samples: blend them by time, so a moving playhead glides
+  // instead of stepping 4× a second
+  const pos = Math.min(n - 1, Math.max(0, t * features.hz - 0.5));
+  const i = Math.floor(pos), j = Math.min(n - 1, i + 1), ft = pos - i;
+  const r0 = features._spec.subarray(i * SPEC_N, (i + 1) * SPEC_N);
+  const r1 = features._spec.subarray(j * SPEC_N, (j + 1) * SPEC_N);
   const lgLo = Math.log(SPEC_LO), lgSpan = Math.log(SPEC_HI / SPEC_LO);
   return hz => {
     const u = ((Math.log(Math.max(hz, SPEC_LO)) - lgLo) / lgSpan) * (SPEC_N - 1);
     const k = Math.min(SPEC_N - 2, Math.max(0, Math.floor(u))), f = Math.min(1, u - k);
-    return (row[k] * (1 - f) + row[k + 1] * f) / 255;
+    const a = r0[k] * (1 - f) + r0[k + 1] * f, b = r1[k] * (1 - f) + r1[k + 1] * f;
+    return (a * (1 - ft) + b * ft) / 255;
   };
 }
 
