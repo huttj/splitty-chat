@@ -286,24 +286,9 @@ body.dragging-anchor .word { cursor: grabbing; }
 .gap:hover {
   background: repeating-linear-gradient(90deg, var(--accent) 0 3px, transparent 3px 7px) center / 100% 2px no-repeat;
 }
-/* a paragraph pause: breaks the line, stands as a vertical dotted gap whose
-   height is the silence — the space between thoughts is the pause itself */
-.gap.gap-br {
-  display: block; width: 2px; margin: 3px 0 3px 6px; /* height set inline from the pause length */
-  background: repeating-linear-gradient(180deg, #454b5e 0 3px, transparent 3px 7px) center / 2px 100% no-repeat;
-}
-.gap.gap-br:hover {
-  background: repeating-linear-gradient(180deg, var(--accent) 0 3px, transparent 3px 7px) center / 2px 100% no-repeat;
-}
-.gap.gap-br.speaking,
-.gap.gap-br.scrub-focus {
-  background:
-    linear-gradient(180deg,
-      transparent calc(var(--f, 50%) - 28%),
-      rgba(255, 255, 255, 0.5) var(--f, 50%),
-      transparent calc(var(--f, 50%) + 28%)),
-    rgba(124, 92, 255, 0.5);
-}
+/* a paragraph pause: breaks the line and sits on a row of its own — the same
+   horizontal dotted run as inline pauses, just longer (width = the silence) */
+.gap.gap-br { display: block; margin: 5px 0; }
 /* the playhead inside a pause: same baseline wash + sliding hotspot as words */
 .gap.speaking,
 .gap.scrub-focus {
@@ -398,8 +383,9 @@ body.dragging-anchor .word { cursor: grabbing; }
 #auth-note { min-height: 18px; margin-top: 8px; margin-bottom: 0; }
 
 body.hide-gaps .gap { display: none; }
-/* skipping pauses still keeps the paragraphs — just without the silence drawn */
-body.hide-gaps .gap.gap-br { display: block; height: 4px !important; background: none; pointer-events: none; }
+/* skipping pauses keeps the paragraphs: the break's dotted run stays as a
+   dim structural marker (the silence itself isn't played, so it isn't a seek target) */
+body.hide-gaps .gap.gap-br { display: block; opacity: 0.45; pointer-events: none; }
 
 /* admin tabs + user rows */
 #admin-tabs { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }

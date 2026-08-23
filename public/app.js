@@ -952,7 +952,7 @@ function initChat() {
         previewVirtual(vt);
       }
     };
-    const scrubTo = (span, clientX, clientY) => {
+    const scrubTo = (span, clientX) => {
       const msg = state.byId.get(span.dataset.mid);
       if (!msg || span.dataset.t == null) return;
       // interpolate within the word/gap from the pointer's x — but the outer
@@ -961,9 +961,7 @@ function initChat() {
       const rect = span.getBoundingClientRect();
       const s = Number(span.dataset.t);
       const en = Number(span.dataset.e ?? span.dataset.t);
-      const f = span.classList.contains('gap-br')
-        ? Math.min(Math.max((clientY - rect.top) / Math.max(rect.height, 1), 0), 1) // vertical gap: y runs the pause
-        : Math.min(Math.max((clientX - rect.left) / Math.max(rect.width, 1), 0), 1);
+      const f = Math.min(Math.max((clientX - rect.left) / Math.max(rect.width, 1), 0), 1);
       const t = f < 0.2 ? s : f > 0.8 ? Math.max(en - 0.001, s) : s + f * Math.max(0, en - s);
       const vt = vtOfMsgTime(span.dataset.mid, t + 0.0005);
       if (vt == null) return;
@@ -997,7 +995,7 @@ function initChat() {
       const under = document.elementFromPoint(ev.clientX, ev.clientY);
       const span = under?.closest?.('.word, .gap');
       if (span) {
-        scrubTo(span, ev.clientX, ev.clientY);
+        scrubTo(span, ev.clientX);
         return;
       }
       // not over a word: the card's margins are seek targets too — above the
@@ -3688,8 +3686,8 @@ function renderMessage(msg, depth, unlocked = false) {
   let wi = 0;
   // audible silences render as widening dotted gaps (gi = index of the word
   // after the pause). Short ones sit inline; a pause long enough to be a
-  // new thought breaks the line and stands as a vertical dotted gap whose
-  // height grows with the silence — the paragraph spacing IS the pause.
+  // new thought breaks the line and sits on a row of its own, a longer
+  // dotted run — the paragraph spacing IS the pause.
   const makeGap = (prevEnd, nextStart, gi) => {
     const gapSec = nextStart - prevEnd;
     if (gapSec < 0.4) return null;
@@ -3700,8 +3698,10 @@ function renderMessage(msg, depth, unlocked = false) {
     g.dataset.gi = gi;
     g.dataset.t = prevEnd;   // scrub range, same shape as words
     g.dataset.e = nextStart;
-    if (br) g.style.height = `${Math.round(Math.min(10 + (gapSec - state.parPause) * 6, 34))}px`;
-    else g.style.width = `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
+    // width grows with the pause; a paragraph gap gets its own row and a longer run
+    g.style.width = br
+      ? `${Math.round(Math.min(40 + (gapSec - state.parPause) * 30, 160))}px`
+      : `${Math.round(Math.min(10 + (gapSec - 0.4) * 26, 56))}px`;
     g.title = `${gapSec.toFixed(1)}s pause`;
     g.onclick = () => tapTranscript(msg.id, prevEnd + 0.01);
     return g;
