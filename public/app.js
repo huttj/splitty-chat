@@ -3178,6 +3178,9 @@ const viz = {
   bands: new Float32Array(VIZ_BANDS.length), smooth: new Float32Array(VIZ_BANDS.length),
   freq: new Uint8Array(128), syn: 0, t0: performance.now(),
   hue: null, // tonal hue from the spectrum — null until a real spectrum has been read
+  sat: 0,    // how colored the picture is: 0 = white (silence) … 1 = the voice's hue
+  phase: 0,  // the ribbons' clock — it only ticks while there's sound
+  last: 0,
 };
 
 // color follows the voice: the spectral centroid (where the sound's energy
@@ -3203,7 +3206,8 @@ function readBands(an, out) {
   if (msum < 255 * 255) return; // too quiet to judge — hold the color
   const f = Math.min(Math.max(Math.log(wsum / msum), CENTROID_LO), CENTROID_HI);
   const target = ((f - CENTROID_LO) / (CENTROID_HI - CENTROID_LO)) * 270; // red → violet
-  viz.hue = viz.hue == null ? target : viz.hue + (target - viz.hue) * 0.06;
+  // glide while speaking; out of silence, take the new voice's color outright
+  viz.hue = viz.hue == null || viz.sat < 0.05 ? target : viz.hue + (target - viz.hue) * 0.06;
 }
 
 // no analyser on the playing clip: pulse with the words being spoken
@@ -3219,7 +3223,7 @@ function syntheticBands(out, t) {
       if (ct <= w.e + 0.08) { speaking = true; break; }
     }
   }
-  const target = el.paused ? 0.04 : speaking ? 0.75 : 0.14;
+  const target = !el.paused && speaking ? 0.75 : 0; // still between words, like the real thing
   viz.syn += (target - viz.syn) * 0.18;
   for (let i = 0; i < out.length; i++) {
     const wob = 0.65 + 0.35 * Math.sin(t * (2.1 + i * 0.9) + i * 1.7) * Math.sin(t * 5.3 + i);
@@ -3247,12 +3251,20 @@ function vizFrame(now) {
   const an = viz.mode === 'play' ? playbackAnalyser(activeEl()) : micAnalyser;
   if (an) readBands(an, viz.bands);
   else if (viz.mode === 'play') { viz.hue = null; syntheticBands(viz.bands, t); }
-  else viz.bands.fill(0.06);
+  else viz.bands.fill(0);
   for (let i = 0; i < viz.bands.length; i++) {
     const d = viz.bands[i] - viz.smooth[i];
     viz.smooth[i] += d * (d > 0 ? 0.45 : 0.1); // quick to rise, slow to settle
   }
-  drawViz(viz.ctx2d, W, H, t, viz.smooth);
+  // nothing moves without sound: the clock advances with the energy, and the
+  // color bleeds in with it — silence is still, flat and white
+  const dt = viz.last ? Math.min((now - viz.last) / 1000, 0.1) : 0;
+  viz.last = now;
+  const energy = (viz.smooth[0] + viz.smooth[1] + viz.smooth[2] + viz.smooth[3]) / 4;
+  viz.phase += dt * Math.max(0, energy - 0.04) * 3.5;
+  const satTarget = Math.min(1, Math.max(0, energy - 0.04) * 4);
+  viz.sat += (satTarget - viz.sat) * (satTarget > viz.sat ? 0.25 : 0.06);
+  drawViz(viz.ctx2d, W, H, viz.phase, viz.smooth);
 }
 
 function drawViz(c, W, H, t, b) {
@@ -3270,14 +3282,16 @@ function drawViz(c, W, H, t, b) {
   // lowest frequency band darkest through highest lightest, so the picture
   // reads as a single color breathing
   const hue = viz.hue ?? (t * 3) % 360;
+  const sat = Math.round(90 * viz.sat); // white at rest, the voice's color when it speaks
   const N = 6, step = Math.max(3, Math.round(W / 160));
   const scale = W / 800 + 0.6;
   for (let r = 0; r < N; r++) {
     const level = b[r % b.length];
     const shade = r / (N - 1);          // 0 = bass (dark) … 1 = treble (light)
-    const light = 30 + 48 * shade;      // body lightness
+    // body lightness: dark→light by band while colored; paler overall at rest
+    const light = (30 + 48 * shade) * viz.sat + (58 + 30 * shade) * (1 - viz.sat);
     const flip = r % 2 ? -1 : 1;        // alternate ribbons crest from above and below
-    const amp = H * (0.05 + 0.3 * level);
+    const amp = H * (0.006 + 0.3 * level); // near-flat lines until there's sound
     const yc = H * (0.5 + 0.1 * Math.sin(t * 0.35 + r * 1.3));
     const crest = [];
     for (let x = 0; x <= W + step; x += step) {
@@ -3296,17 +3310,17 @@ function drawViz(c, W, H, t, b) {
     c.lineTo((crest.length - 1) * step, edge);
     c.closePath();
     const fg = c.createLinearGradient(0, yc - flip * amp, 0, edge);
-    fg.addColorStop(0, `hsla(${hue}, 90%, ${light}%, ${0.06 + 0.1 * level})`);
-    fg.addColorStop(1, `hsla(${hue}, 90%, ${light - 20}%, 0)`);
+    fg.addColorStop(0, `hsla(${hue}, ${sat}%, ${light}%, ${0.06 + 0.1 * level})`);
+    fg.addColorStop(1, `hsla(${hue}, ${sat}%, ${light - 20}%, 0)`);
     c.fillStyle = fg;
     c.fill();
     // crest: a thin neon line — the glow is a real blur, not a wider stroke,
     // and the width never changes with volume (brightness does)
     c.beginPath();
     crest.forEach((y, i) => (i ? c.lineTo(i * step, y) : c.moveTo(0, y)));
-    c.shadowColor = `hsla(${hue}, 100%, ${light + 10}%, ${0.5 + 0.5 * level})`;
+    c.shadowColor = `hsla(${hue}, ${sat}%, ${light + 10}%, ${0.5 + 0.5 * level})`;
     c.shadowBlur = 14 * scale;
-    c.strokeStyle = `hsla(${hue}, 90%, ${light + 22}%, ${0.45 + 0.55 * level})`;
+    c.strokeStyle = `hsla(${hue}, ${sat}%, ${light + 22}%, ${0.45 + 0.55 * level})`;
     c.lineWidth = 1.3 * scale;
     c.stroke();
     c.shadowBlur = 0;
@@ -3314,8 +3328,8 @@ function drawViz(c, W, H, t, b) {
   // a soft core that swells with the voice — the lightest tint of the same hue
   const rad = Math.min(W, H) * (0.18 + 0.32 * energy);
   const og = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, rad);
-  og.addColorStop(0, `hsla(${hue}, 90%, 88%, ${0.15 + 0.4 * energy})`);
-  og.addColorStop(0.5, `hsla(${hue}, 90%, 70%, ${0.05 + 0.12 * energy})`);
+  og.addColorStop(0, `hsla(${hue}, ${sat}%, 88%, ${0.45 * energy})`);
+  og.addColorStop(0.5, `hsla(${hue}, ${sat}%, 70%, ${0.14 * energy})`);
   og.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
   c.fillStyle = og;
   c.fillRect(W / 2 - rad, H / 2 - rad, rad * 2, rad * 2);
