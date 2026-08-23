@@ -2963,10 +2963,28 @@ function exprFor(msg) {
   msg._expr = { key, v };
   return v;
 }
-// brightness = energy (lux is energy), hue = tension (calm teal … tense coral),
-// saturation = flow (choppy grey … smooth and alive). Kept pastel.
-const exprColor = x =>
-  `hsl(${Math.round(195 - 185 * x.tension)}, ${Math.round(22 + 52 * x.flow)}%, ${Math.round(46 + 32 * x.energy)}%)`;
+// brightness = energy (lux is energy), hue = tension (calm blue … tense red,
+// by way of purple — never through green), chroma = flow (choppy grey …
+// smooth and alive). Mixed in OKLCH so the ramp is perceptually even and
+// stays pastel; out-of-gamut channels are clipped.
+function oklch(L, C, h) {
+  const a = C * Math.cos((h * Math.PI) / 180), b = C * Math.sin((h * Math.PI) / 180);
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+  const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+  const s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+  const l = l_ ** 3, m = m_ ** 3, sv = s_ ** 3;
+  const lin = [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * sv,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * sv,
+    -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * sv,
+  ];
+  const srgb = lin.map(v => {
+    const c = Math.min(1, Math.max(0, v));
+    return Math.round(255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055));
+  });
+  return `rgb(${srgb.join(',')})`;
+}
+const exprColor = x => oklch(0.58 + 0.28 * x.energy, 0.035 + 0.13 * x.flow, 264 + 121 * x.tension); // 264° blue → 385°≡25° red
 
 // Older messages have no track: the author (or an editor) quietly computes
 // one from the stored voice audio and saves it — one at a time, only while
