@@ -3,3 +3,5 @@ data/
 .env
 .dev.vars
 .wrangler/
+scripts/.reencode-tmp/
+scripts/.reencode-done.json

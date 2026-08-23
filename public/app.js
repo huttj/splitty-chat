@@ -425,6 +425,7 @@ async function ensureCam() {
     preview.srcObject = null;
   }
   listenToMic(camStream); // the visualizer follows whichever mic is live
+  probeStreaming(camStream); // which container can stream up while recording
   updateStage();
   return camStream;
 }
@@ -2420,6 +2421,36 @@ const QUALITY = {
   high: { width: 960, cam: 1_100_000, screen: 1_500_000 },
 };
 
+// Which container to record. MP4 plays everywhere, but Chromium's MP4
+// recorder ignores the timeslice and hands over the whole file at stop — so
+// it can't stream up while recording. Where that's the case, WebM comes
+// first (it streams a chunk a second). The re-encode script normalizes
+// stored WebM to faststart MP4 afterwards.
+const MP4_MIMES = ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4'];
+const WEBM_MIMES = ['video/webm;codecs=vp9,opus', 'video/webm'];
+function pickVideoMime() {
+  const mp4Streams = sessionStorage.getItem('splitty:mp4streams'); // '1' | '0' | null (not probed yet)
+  const order = mp4Streams === '0' ? [...WEBM_MIMES, ...MP4_MIMES] : [...MP4_MIMES, ...WEBM_MIMES];
+  return order.find(m => MediaRecorder.isTypeSupported(m)) || '';
+}
+// a 1.2s silent test recording tells us whether MP4 streams here; once per session
+async function probeStreaming(stream) {
+  if (sessionStorage.getItem('splitty:mp4streams') || !stream.getVideoTracks().length) return;
+  const mime = MP4_MIMES.find(m => MediaRecorder.isTypeSupported(m));
+  if (!mime) return sessionStorage.setItem('splitty:mp4streams', '0');
+  if (!WEBM_MIMES.some(m => MediaRecorder.isTypeSupported(m))) return sessionStorage.setItem('splitty:mp4streams', '1'); // no alternative anyway
+  try {
+    const r = new MediaRecorder(new MediaStream(stream.getVideoTracks()), { mimeType: mime, videoBitsPerSecond: 200000 });
+    let during = 0;
+    r.ondataavailable = e => { if (r.state === 'recording' && e.data.size) during++; };
+    r.start(300);
+    await new Promise(res => setTimeout(res, 1200));
+    r.stop();
+    await new Promise(res => setTimeout(res, 300));
+    sessionStorage.setItem('splitty:mp4streams', during > 0 ? '1' : '0');
+  } catch { /* leave unprobed: mp4 first */ }
+}
+
 async function toggleRecord() {
   if (state.rec) return stopRecord();
   if (!canComment()) {
@@ -2462,12 +2493,7 @@ async function toggleRecord() {
     return;
   }
 
-  const videoMime = [
-    'video/mp4;codecs=avc1,mp4a.40.2',
-    'video/mp4',
-    'video/webm;codecs=vp9,opus',
-    'video/webm',
-  ].find(m => MediaRecorder.isTypeSupported(m)) || '';
+  const videoMime = pickVideoMime();
   const audioMime = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm']
     .find(m => MediaRecorder.isTypeSupported(m)) || '';
 
@@ -2496,11 +2522,15 @@ async function toggleRecord() {
       ...(videoMime && { mimeType: videoMime }),
       videoBitsPerSecond: QUALITY[state.quality].screen,
     });
-    screenRecorder.ondataavailable = e => e.data.size && sChunks.push(e.data);
+    screenRecorder.ondataavailable = e => { if (e.data.size) { sChunks.push(e.data); state.rec?.screenStream?.push(e.data); } };
   }
 
+  // the clip streams to R2 as it records (chunks kept in memory too: the
+  // fallback upload and crash recovery still need the whole blob)
+  const vStream = streamUpload(() => recorder.mimeType || (voice ? 'audio/webm' : 'video/webm'));
+  const sStream = screenRecorder ? streamUpload(() => screenRecorder.mimeType || 'video/webm') : null;
   const vChunks = [], aChunks = [];
-  recorder.ondataavailable = e => e.data.size && vChunks.push(e.data);
+  recorder.ondataavailable = e => { if (e.data.size) { vChunks.push(e.data); vStream.push(e.data); } };
   if (audioRecorder) audioRecorder.ondataavailable = e => e.data.size && aChunks.push(e.data);
   let stoppedCount = 0;
   const stopTarget = 1 + (audioRecorder ? 1 : 0) + (screenRecorder ? 1 : 0);
@@ -2511,6 +2541,8 @@ async function toggleRecord() {
     state.rec = null;
     if (rec.discard) {
       // accidental tap — 79ms videos help nobody
+      vStream.abort();
+      sStream?.abort();
       showToast('Too short — tap record, talk, then tap again to send');
       updateStage();
       updateHint();
@@ -2521,6 +2553,8 @@ async function toggleRecord() {
       videoBlob: new Blob(vChunks, { type: recorder.mimeType || (voice ? 'audio/webm' : 'video/webm') }),
       audioBlob: audioRecorder ? new Blob(aChunks, { type: audioRecorder.mimeType }) : null,
       screenBlob: sChunks.length ? new Blob(sChunks, { type: screenRecorder.mimeType }) : null,
+      videoStream: vStream,
+      screenStream: sStream,
       rec,
       durationMs,
     });
@@ -2547,10 +2581,10 @@ async function toggleRecord() {
   // where the clip routes: editors record into whatever layer they're
   // viewing; members post to the base; comment-only viewers into their own
   const recLayer = canEdit() ? state.layer : canComment() ? '' : (state.auth?.user?.id || '');
-  state.rec = { recorder, audioRecorder, screenRecorder, startTs: Date.now(), parentId, anchorMs, resume, layer: recLayer };
-  recorder.start();
+  state.rec = { recorder, audioRecorder, screenRecorder, videoStream: vStream, screenStream: sStream, startTs: Date.now(), parentId, anchorMs, resume, layer: recLayer };
+  recorder.start(1000);      // a chunk a second → streams up as it records
   audioRecorder?.start();
-  screenRecorder?.start();
+  screenRecorder?.start(1000);
   updateStage();
   updateHint();
 }
@@ -2668,6 +2702,72 @@ async function chunkUpload(blob, onBytes) {
   }
 }
 
+// Upload WHILE recording: MediaRecorder hands over a chunk every second;
+// they accumulate into 8MB parts that go straight to R2 as multipart parts.
+// By the time you tap stop, nearly the whole clip is already up — only the
+// tail part + complete + the message POST remain. Anything failing here
+// just means the job falls back to uploading the assembled blob afterwards.
+function streamUpload(mimeOf) {
+  let key = null, uploadId = null, n = 0, buf = [], bufBytes = 0, failed = false, init = null;
+  const parts = [];
+  let chain = Promise.resolve();
+  const ensureInit = () => (init ||= jfetch(`/api/chats/${state.chatId}/uploads`, {
+    method: 'POST', headers: JSONH, body: JSON.stringify({ mime: mimeOf() }),
+  }).then(d => { key = d.key; uploadId = d.uploadId; }));
+  const sendPart = blob => {
+    const num = ++n;
+    chain = chain.then(async () => {
+      if (failed) return;
+      await ensureInit();
+      let attempt = 0;
+      for (;;) {
+        try {
+          const res = await fetch(
+            `/api/chats/${state.chatId}/uploads/part?key=${key}&id=${encodeURIComponent(uploadId)}&n=${num}`,
+            { method: 'PUT', body: blob }
+          );
+          if (!res.ok) throw new Error(`part ${res.status}`);
+          parts.push({ partNumber: num, etag: (await res.json()).etag });
+          sent += blob.size;
+          return;
+        } catch (err) {
+          if (++attempt >= 3) throw err;
+          await new Promise(r => setTimeout(r, 1500 * attempt));
+        }
+      }
+    }).catch(() => { failed = true; });
+  };
+  let sent = 0;
+  return {
+    get sent() { return sent; },
+    get failed() { return failed; },
+    push(blob) {
+      if (failed) return;
+      buf.push(blob);
+      bufBytes += blob.size;
+      if (bufBytes >= PART_SIZE) { sendPart(new Blob(buf, { type: mimeOf() })); buf = []; bufBytes = 0; }
+    },
+    async finish() {
+      if (buf.length) { sendPart(new Blob(buf, { type: mimeOf() })); buf = []; bufBytes = 0; }
+      await chain;
+      if (failed || !key || !parts.length) throw new Error('stream upload failed');
+      await jfetch(`/api/chats/${state.chatId}/uploads/complete`, {
+        method: 'POST', headers: JSONH, body: JSON.stringify({ key, uploadId, parts }),
+      });
+      return key;
+    },
+    async abort() {
+      failed = true;
+      await chain.catch(() => {});
+      if (key) {
+        fetch(`/api/chats/${state.chatId}/uploads/abort`, {
+          method: 'POST', headers: JSONH, body: JSON.stringify({ key, uploadId }),
+        }).catch(() => {});
+      }
+    },
+  };
+}
+
 async function uploadJob(job) {
   const { videoBlob, screenBlob, rec } = job;
   job.phase = 'sending';
@@ -2683,6 +2783,16 @@ async function uploadJob(job) {
   // track (or the voice clip itself), decoded alongside the upload; file
   // uploads get theirs from the PCM they're already extracting
   const analysis = job.audioPromise ? null : analyzeBlob(job.audioBlob?.size ? job.audioBlob : videoBlob);
+  // streamed during the recording? finish those first — a failure there
+  // just means the assembled blob goes up the normal way
+  if (!job.videoKey && job.videoStream) {
+    try { job.videoKey = await job.videoStream.finish(); } catch { job.videoStream.abort(); }
+    job.videoStream = null;
+  }
+  if (!job.screenKey && job.screenStream) {
+    try { job.screenKey = await job.screenStream.finish(); } catch { job.screenStream.abort(); }
+    job.screenStream = null;
+  }
   if (!job.videoKey) job.videoKey = await chunkUpload(videoBlob, onBytes);
   if (screenBlob && screenBlob.size && !job.screenKey) job.screenKey = await chunkUpload(screenBlob, onBytes);
 
@@ -3391,6 +3501,8 @@ function updateHint(text) {
     text = `● ${what} ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')} — tap to send`;
     const left = MAX_RECORD_MS - elapsed;
     if (left < 60_000) text += ` · ${Math.max(Math.ceil(left / 1000), 0)}s left`;
+    const up = (state.rec.videoStream?.sent || 0) + (state.rec.screenStream?.sent || 0);
+    if (up) text += ` · ${(up / 1e6).toFixed(0)}MB sent`;
   }
   if (text == null && state.recNudge) text = "You're in — tap ● to record";
   if (text == null && uploader.jobs.length) {
