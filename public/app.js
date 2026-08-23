@@ -51,6 +51,8 @@ const state = {
   // expressiveness display: any of 'strip' (heat bar per message), 'text'
   // (colored words), 'highlight' (colored playhead wash) — comma-joined, '' = off
   expr: localStorage.getItem('splitty:expr') || '',
+  // recording quality: 'standard' (640px, ~half the bytes — loads fast) | 'high' (960px)
+  quality: localStorage.getItem('splitty:quality') || 'standard',
   // visualizer detail: 'full' (six band lines, neon blur) | 'simple' (one line, no blur — phones)
   vizMode: localStorage.getItem('splitty:viz') || (/Mobi|Android|iPhone|iPad/i.test(navigator.userAgent) ? 'simple' : 'full'),
   // a pause this long breaks the transcript into a new paragraph — tunable
@@ -349,7 +351,7 @@ async function toggleScreen() {
     screenStream = await navigator.mediaDevices.getDisplayMedia({
       // capped at 1080p/10fps — screens are mostly still, and this keeps a
       // 10-minute share under ~90MB. (A crisper HD preset could be a paid
-      // tier later: bump these caps + SCREEN_BITRATE together.)
+      // tier later: bump these caps + QUALITY.*.screen together.)
       video: { width: { max: 1920 }, height: { max: 1080 }, frameRate: { ideal: 10, max: 15 } },
       audio: false, // the mic on the camera track is the voice
     });
@@ -394,7 +396,7 @@ async function ensureCam() {
   try {
     camPending = navigator.mediaDevices.getUserMedia({
       video: wantVideo
-        ? { facingMode: 'user', width: { ideal: 960 }, ...(camId && { deviceId: { ideal: camId } }) }
+        ? { facingMode: 'user', width: { ideal: QUALITY[state.quality].width }, ...(camId && { deviceId: { ideal: camId } }) }
         : false,
       audio: micId ? { deviceId: { ideal: micId } } : true,
     });
@@ -615,6 +617,19 @@ function initMenu() {
     localStorage.setItem('splitty:silpad', String(state.silPad));
     paintPad();
     trimChanged();
+  };
+  // recording quality: re-opens the camera at the new size when it's live
+  const qs = $('#quality-sel');
+  qs.value = state.quality;
+  qs.onchange = async () => {
+    if (state.rec) { showToast('Finish this clip first — quality switches between recordings'); qs.value = state.quality; return; }
+    state.quality = qs.value;
+    localStorage.setItem('splitty:quality', state.quality);
+    if (camStream && camHasVideo()) {
+      camStream.getTracks().forEach(t => t.stop());
+      camStream = null;
+      await ensureCam().catch(() => {});
+    }
   };
   // visualizer detail: six blurred band lines, or one plain line for weaker devices
   const vz = $('#viz-sel');
@@ -2397,9 +2412,13 @@ function refreshFilter() {
 
 // ---------- recording ----------
 const MAX_RECORD_MS = 10 * 60 * 1000; // keep clips balanced
-// screens carry text (bits matter), faces don't — weight the budget that way
-const SCREEN_BITRATE = 1_500_000;
-const CAM_BITRATE = 1_100_000;
+// screens carry text (bits matter), faces don't — weight the budget that way.
+// Standard is the default: half the bytes of High, so clips load fast for
+// everyone watching. (High could become a paid tier — it's one switch here.)
+const QUALITY = {
+  standard: { width: 640, cam: 550_000, screen: 900_000 },
+  high: { width: 960, cam: 1_100_000, screen: 1_500_000 },
+};
 
 async function toggleRecord() {
   if (state.rec) return stopRecord();
@@ -2463,7 +2482,7 @@ async function toggleRecord() {
       )
     : new MediaRecorder(stream, {
         ...(videoMime && { mimeType: videoMime }),
-        videoBitsPerSecond: CAM_BITRATE,
+        videoBitsPerSecond: QUALITY[state.quality].cam,
       });
   const audioRecorder = voice ? null : new MediaRecorder(
     new MediaStream(stream.getAudioTracks()),
@@ -2475,7 +2494,7 @@ async function toggleRecord() {
   if (screenStream?.active) {
     screenRecorder = new MediaRecorder(screenStream, {
       ...(videoMime && { mimeType: videoMime }),
-      videoBitsPerSecond: SCREEN_BITRATE,
+      videoBitsPerSecond: QUALITY[state.quality].screen,
     });
     screenRecorder.ondataavailable = e => e.data.size && sChunks.push(e.data);
   }

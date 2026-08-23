@@ -89,6 +89,10 @@
         <div class="menu-div"></div>
         <label>Camera<select id="cam-sel"></select></label>
         <label>Microphone<select id="mic-sel"></select></label>
+        <label>Recording quality<select id="quality-sel" title="Standard is half the size of High — clips load much faster for everyone">
+          <option value="standard">Standard — loads fast</option>
+          <option value="high">High — 960px, larger files</option>
+        </select></label>
         <label>Transcription language<select id="lang-sel">
           <option value="">Auto-detect</option>
           <option value="en">English</option>
@@ -334,6 +338,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=129"></script>
+  <script src="/app.js?v=130"></script>
 </body>
 </html>
