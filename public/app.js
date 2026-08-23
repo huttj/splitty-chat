@@ -2868,6 +2868,17 @@ async function audioFeatures(mono, rate) {
   return { hz: FEAT_HZ, loud: loud.map(Math.round), pitch: pitch.map(Math.round), spec: b64.enc(spec) };
 }
 
+// the expressiveness color ([L, C, h]) of the word being spoken at t, if known
+function wordLCHAt(msg, t) {
+  if (!msg?.words.length) return null;
+  const expr = exprFor(msg);
+  if (!expr) return null;
+  let i = -1;
+  for (let k = 0; k < msg.words.length; k++) { if (msg.words[k].s <= t) i = k; else break; }
+  if (i < 0) return null;
+  return exprLCH(expr[i]);
+}
+
 // the stored spectrum at a moment, as spectrum-at-Hz (0..1) — the same shape
 // the live analyser gives, so the lines look the same paused or scrubbing
 function storedSpecAt(features, t) {
@@ -3037,7 +3048,7 @@ function exprFor(msg) {
 // by way of purple — never through green), chroma = flow (choppy grey …
 // smooth and alive). Mixed in OKLCH so the ramp is perceptually even and
 // stays pastel; out-of-gamut channels are clipped.
-function oklch(L, C, h) {
+function oklch(L, C, h, alpha = null) {
   const a = C * Math.cos((h * Math.PI) / 180), b = C * Math.sin((h * Math.PI) / 180);
   const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
   const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
@@ -3052,13 +3063,14 @@ function oklch(L, C, h) {
     const c = Math.min(1, Math.max(0, v));
     return Math.round(255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055));
   });
-  return `rgb(${srgb.join(',')})`;
+  return alpha == null ? `rgb(${srgb.join(',')})` : `rgba(${srgb.join(',')},${alpha})`;
 }
 // 264° blue → 385°≡25° red. Text is a thin stroke and reads dimmer than the
 // same color filling an area, so the word variant is lifted to match by eye.
-const exprColor = (x, text = false) => text
-  ? oklch(0.64 + 0.3 * x.energy, 0.05 + 0.17 * x.flow, 264 + 121 * x.tension)
-  : oklch(0.52 + 0.38 * x.energy, 0.03 + 0.17 * x.flow, 264 + 121 * x.tension);
+const exprLCH = (x, text = false) => text
+  ? [0.64 + 0.3 * x.energy, 0.05 + 0.17 * x.flow, 264 + 121 * x.tension]
+  : [0.52 + 0.38 * x.energy, 0.03 + 0.17 * x.flow, 264 + 121 * x.tension];
+const exprColor = (x, text = false) => oklch(...exprLCH(x, text));
 
 // Older messages have no track: the author (or an editor) quietly computes
 // one from the stored voice audio and saves it — one at a time, only while
@@ -3528,13 +3540,14 @@ const viz = {
   el: null, ctx2d: null, raf: 0, mode: 'mic',
   bands: new Float32Array(VIZ_N), smooth: new Float32Array(VIZ_N),
   freq: new Uint8Array(1024), time: new Float32Array(2048),
-  syn: 0, t0: performance.now(),
+  t0: performance.now(),
   hue: null, // from the pitch — null until a voice has been heard
   sat: 0,    // how colored the picture is: 0 = white (silence) … 1 = the voice's hue
   f0: null,  // smoothed pitch, Hz
   frame: 0,
   specAt: null, // hz → 0..1, whatever is feeding the lines right now
   snap: null,   // { id, t } — where a seek landed: shown once, static, while paused
+  lch: null,    // [L, C, h] — during playback, the spoken word's expressiveness color (smoothed)
 };
 
 // Pitch → hue, fixed: the hue range is cut in two, the bottom half for low
@@ -3657,28 +3670,6 @@ function storedBands(msg, t, out) {
   return true;
 }
 
-// no analyser on the playing clip and no track: pulse with the words being spoken
-function syntheticBands(out, t) {
-  const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
-  const msg = seg && state.byId.get(seg.id);
-  const el = activeEl();
-  let speaking = false;
-  if (msg && !el.paused) {
-    const ct = el.currentTime - state.wordLag;
-    for (const w of msg.words) {
-      if (w.s > ct) break;
-      if (ct <= w.e + 0.08) { speaking = true; break; }
-    }
-  }
-  const target = !el.paused && speaking ? 0.75 : 0; // still between words, like the real thing
-  viz.syn += (target - viz.syn) * 0.18;
-  for (let i = 0; i < out.length; i++) {
-    const wob = 0.65 + 0.35 * Math.sin(t * (2.1 + i * 0.9) + i * 1.7) * Math.sin(t * 5.3 + i);
-    out[i] = viz.syn * wob * (i < 3 ? 1 : 0.6);
-  }
-  viz.specAt = hz => viz.syn * Math.exp(-hz / 1500);
-}
-
 function showViz(on, mode = viz.mode) {
   if (!viz.el) { viz.el = $('#viz'); viz.ctx2d = viz.el.getContext('2d'); }
   viz.mode = mode;
@@ -3710,11 +3701,25 @@ function vizFrame(now) {
     } else {
       viz.snap = null; // once it plays, a later pause is plain flat
       const an = playbackAnalyser(el);
-      if (an) readBands(an, viz.bands);
-      else syntheticBands(viz.bands, t);
-      fed = true;
+      const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
+      const cur = seg && state.byId.get(seg.id);
+      if (an) { readBands(an, viz.bands); fed = true; }
+      else if (cur) {
+        // no WebAudio chain (compressor off): the stored track stands in, read at the playhead
+        ensureFeatures(cur);
+        fed = storedBands(cur, el.currentTime, viz.bands);
+      }
+    }
+    // the color is the spoken word's expressiveness color, same as the highlighter
+    const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
+    const cur = seg && state.byId.get(seg.id);
+    const target = cur && !el.paused ? wordLCHAt(cur, el.currentTime - state.wordLag) : (viz.snap && cur ? wordLCHAt(cur, viz.snap.t) : null);
+    if (target) {
+      if (!viz.lch || viz.sat < 0.05) viz.lch = target.slice();
+      else for (let i = 0; i < 3; i++) viz.lch[i] += (target[i] - viz.lch[i]) * 0.12;
     }
   } else if (micAnalyser) {
+    viz.lch = null; // live mic: no words yet — the pitch color
     readBands(micAnalyser, viz.bands);
     fed = true;
   }
@@ -3744,6 +3749,12 @@ function drawViz(c, W, H, energy) {
   // through treble lightest, so the picture reads as a single color breathing
   const hue = viz.hue ?? 0;
   const sat = Math.round(85 * viz.sat); // white at rest, the voice's color when it speaks
+  // color source: the spoken word's expressiveness color during playback
+  // (the highlighter's color), the pitch hue off the live mic; both fade to
+  // white in silence. L is 0..1 lightness.
+  const col = viz.lch
+    ? (L, alpha) => oklch(L, viz.lch[1] * viz.sat, viz.lch[2], alpha)
+    : (L, alpha) => `hsla(${hue}, ${sat}%, ${Math.round(L * 100)}%, ${alpha})`;
   const scale = W / 800 + 0.6;
   const mid = H / 2, span = H * 0.4, half = W / 2;
   const at = viz.specAt;
@@ -3776,17 +3787,22 @@ function drawViz(c, W, H, energy) {
     }
   };
   const level = energy;
-  const dark = 28 * viz.sat + 58 * (1 - viz.sat), light = 88 * viz.sat + 95 * (1 - viz.sat);
+  // lightness anchors (0..1): dark at the center, light at the edges; both
+  // drift toward white as the sound fades. With a word color, they sit
+  // around that word's own lightness.
+  const baseL = viz.lch ? viz.lch[0] : 0.58;
+  const dark = (viz.lch ? Math.max(0.25, baseL - 0.24) : 0.28) * viz.sat + 0.58 * (1 - viz.sat);
+  const light = (viz.lch ? Math.min(0.97, baseL + 0.12) : 0.88) * viz.sat + 0.95 * (1 - viz.sat);
   // along the line: dark at the center (bass), climbing steeply to bright at
   // the edges (treble) — the extra stops push the brightness outward
   const grad = alpha => {
     const g = c.createLinearGradient(0, 0, W, 0);
     const midL = (dark + light) / 2;
-    g.addColorStop(0, `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`);
-    g.addColorStop(0.22, `hsla(${hue}, ${sat}%, ${midL}%, ${alpha})`);
-    g.addColorStop(0.5, `hsla(${hue}, ${sat}%, ${dark}%, ${alpha})`);
-    g.addColorStop(0.78, `hsla(${hue}, ${sat}%, ${midL}%, ${alpha})`);
-    g.addColorStop(1, `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`);
+    g.addColorStop(0, col(light, alpha));
+    g.addColorStop(0.22, col(midL, alpha));
+    g.addColorStop(0.5, col(dark, alpha));
+    g.addColorStop(0.78, col(midL, alpha));
+    g.addColorStop(1, col(light, alpha));
     return g;
   };
   c.lineJoin = 'round';
@@ -3795,7 +3811,7 @@ function drawViz(c, W, H, energy) {
     c.beginPath();
     trace(-1);
     trace(1);
-    c.strokeStyle = `hsla(${hue}, ${sat}%, ${(dark + light) / 2}%, ${0.6 + 0.4 * level})`;
+    c.strokeStyle = col((dark + light) / 2, 0.6 + 0.4 * level);
     c.lineWidth = 1.6 * scale;
     c.stroke();
     c.globalCompositeOperation = 'source-over';
@@ -3810,13 +3826,13 @@ function drawViz(c, W, H, energy) {
     trace(1, true);   // bottom, right → left, same subpath
     c.closePath();
     const hg = c.createLinearGradient(0, mid - span, 0, mid + span);
-    hg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark + 18}%, ${0.1 + 0.25 * level})`);
-    hg.addColorStop(0.5, `hsla(${hue}, ${sat}%, ${dark}%, 0)`);
-    hg.addColorStop(1, `hsla(${hue}, ${sat}%, ${dark + 18}%, ${0.1 + 0.25 * level})`);
+    hg.addColorStop(0, col(dark + 0.18, 0.1 + 0.25 * level));
+    hg.addColorStop(0.5, col(dark, 0));
+    hg.addColorStop(1, col(dark + 0.18, 0.1 + 0.25 * level));
     c.fillStyle = hg;
     c.fill();
   }
-  c.shadowColor = `hsla(${hue}, ${sat}%, ${light}%, ${0.5 + 0.5 * level})`;
+  c.shadowColor = col(light, 0.5 + 0.5 * level);
   c.shadowBlur = 16 * scale;
   // the line, above and below alike — thin, its width never changes with volume
   c.beginPath();
