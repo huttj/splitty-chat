@@ -3726,39 +3726,25 @@ function drawViz(c, W, H, energy) {
     c.lineTo(0, mid);
     c.closePath();
     const peak = Math.max(...ys, 1);
-    const hg = c.createRadialGradient(half, mid, 0, half, mid, Math.max(half, peak));
-    hg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark}%, 0)`);
-    hg.addColorStop(0.55, `hsla(${hue}, ${sat}%, ${dark}%, ${0.02 + 0.05 * level})`);
+    const hg = c.createLinearGradient(0, mid - peak, 0, mid + peak); // top edge → midline → bottom edge
+    hg.addColorStop(0, `hsla(${hue}, ${sat}%, ${dark + 15}%, ${0.08 + 0.22 * level})`);
+    hg.addColorStop(0.5, `hsla(${hue}, ${sat}%, ${dark}%, 0)`);
     hg.addColorStop(1, `hsla(${hue}, ${sat}%, ${dark + 15}%, ${0.08 + 0.22 * level})`);
     c.fillStyle = hg;
     c.fill();
   }
   if (!simple) {
-    // reflection: the same line below, fainter, no glow
-    c.beginPath();
-    trace(1);
-    c.strokeStyle = grad(0.12 + 0.18 * level);
-    c.lineWidth = 1.2 * scale;
-    c.stroke();
     c.shadowColor = `hsla(${hue}, ${sat}%, ${light}%, ${0.5 + 0.5 * level})`;
     c.shadowBlur = 16 * scale;
   }
-  // the line itself — thin, its width never changes with volume
+  // the line, above and below alike — thin, its width never changes with volume
   c.beginPath();
   trace(-1);
+  trace(1);
   c.strokeStyle = grad(simple ? 0.6 + 0.4 * level : 0.55 + 0.45 * level);
   c.lineWidth = (simple ? 1.6 : 1.5) * scale;
   c.stroke();
   c.shadowBlur = 0;
-  // a soft core that swells with the voice — the lightest tint of the same hue
-  if (simple) { c.globalCompositeOperation = 'source-over'; return; }
-  const rad = Math.min(W, H) * (0.18 + 0.32 * energy);
-  const og = c.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, rad);
-  og.addColorStop(0, `hsla(${hue}, ${sat}%, 88%, ${0.25 * energy})`);
-  og.addColorStop(0.5, `hsla(${hue}, ${sat}%, 70%, ${0.07 * energy})`);
-  og.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-  c.fillStyle = og;
-  c.fillRect(W / 2 - rad, H / 2 - rad, rad * 2, rad * 2);
   c.globalCompositeOperation = 'source-over';
 }
 
