@@ -1386,7 +1386,7 @@ async function poll() {
     // carry it across polls so it isn't refetched every 2.5s
     for (const m of data.messages) {
       const prev = state.byId.get(m.id);
-      if (prev?.features && m.hasFeatures) { m.features = prev.features; m._expr = prev._expr; }
+      if (prev?.features && m.hasFeatures) { m.features = prev.features; m._raw = prev._raw; m._expr = prev._expr; }
     }
     state.messages = data.messages;
     state.byId = new Map(data.messages.map(m => [m.id, m]));
@@ -2889,7 +2889,7 @@ function ensureFeatures(msg) {
     .then(d => {
       msg.features = d.features;
       msg._expr = null;
-      if (state.expr) { state.lastRenderKey = ''; render(); }
+      if (state.expr) { state.lastRenderKey = ''; render(); } // (the speaker's profile shifts — every card of theirs recolors)
     })
     .catch(() => featFailed.add(msg.id)) // once — a bad fetch must not become a per-frame loop
     .finally(() => featFetching.delete(msg.id));
@@ -2906,16 +2906,33 @@ async function analyzeBlob(blob) {
 }
 
 // per-word reads, each 0..1, derived from the track + word timings:
-//   energy  — pace, loudness above the message's norm, pitch above the speaker's norm
+//   energy  — pace, loudness above the speaker's norm, pitch above the speaker's norm
 //   flow    — smoothness: few pauses, even rhythm (vs. choppy, searching)
 //   tension — punchiness: loudness and pitch swinging hard over a short span
 // Heuristics, openly: they are how the numbers are read, not ground truth.
+//
+// Raw sub-metrics per word first; then each is placed against the SPEAKER's
+// own typical range (p10–p90 across every message of theirs with a track in
+// this chat), so a quiet talker's loud moments read as loud for them, and a
+// big talker isn't permanently red. Composites come from those, through one
+// fixed contrast curve.
 const clamp01 = v => Math.min(1, Math.max(0, v));
 const median = arr => { const a = [...arr].sort((x, y) => x - y); return a.length ? a[a.length >> 1] : null; };
-function exprFor(msg) {
-  ensureFeatures(msg);
+const quantile = (sorted, p) => sorted[Math.floor((sorted.length - 1) * p)];
+const stdev = arr => {
+  if (arr.length < 2) return 0;
+  const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+  return Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length);
+};
+const EXPR_KEYS = ['pace', 'pause', 'cv', 'loud', 'pitch', 'loudStd', 'pitchStd'];
+// a speaker's range never shrinks below these — a monotone speaker stays calm, not noisy
+const EXPR_FLOOR = { pace: 1.2, pause: 0.15, cv: 0.3, loud: 5, pitch: 5, loudStd: 2.5, pitchStd: 3 };
+// defaults (measured on real speech) that a speaker with few words blends toward
+const EXPR_DEFAULT = { pace: [1.5, 2.8, 5.4], pause: [0.08, 0.24, 0.35], cv: [0.5, 0.7, 0.96], loud: [-7.5, -1, 7], pitch: [-3.2, 1.3, 8.8], loudStd: [1.5, 4.6, 6], pitchStd: [0.9, 3.3, 6.8] };
+
+function rawFor(msg) {
   const key = `${msg.words.length}|${msg.features ? msg.features.loud.length : 0}`;
-  if (msg._expr?.key === key) return msg._expr.v;
+  if (msg._raw?.key === key) return msg._raw.v;
   const words = msg.words;
   if (!words.length) return null;
   const f = msg.features, hz = f?.hz || 0;
@@ -2927,15 +2944,9 @@ function exprFor(msg) {
     const voiced = semi.filter(v => v != null);
     pitchMed = voiced.length >= 8 ? median(voiced) : null;
   }
-  const std = arr => {
-    if (arr.length < 2) return 0;
-    const m = arr.reduce((a, b) => a + b, 0) / arr.length;
-    return Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length);
-  };
   const centers = words.map(w => (w.s + w.e) / 2);
   const v = words.map((w, i) => {
     const c = centers[i];
-    // pace: words per second around here
     const lo = Math.max(0, c - 2.5), hi = Math.min(dur, c + 2.5);
     let n = 0, voicedSec = 0;
     const starts = [];
@@ -2945,42 +2956,72 @@ function exprFor(msg) {
       starts.push(words[k].s);
       voicedSec += Math.min(words[k].e, hi) - Math.max(words[k].s, lo);
     }
-    const paceN = clamp01(((n / Math.max(hi - lo, 0.5)) - 1) / 5); // 1 wps slow … 6 wps fast (real speech hits 6)
-    const pauseFrac = clamp01(1 - voicedSec / Math.max(hi - lo, 0.5));
-    // rhythm: spread of the gaps between word onsets (coefficient of variation)
     const gaps = [];
     for (let k = 1; k < starts.length; k++) gaps.push(starts[k] - starts[k - 1]);
     const gm = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
-    const cv = gm > 0 ? std(gaps) / gm : 0;
-    let loudN = 0.5, pitchN = 0.5, loudVar = 0, pitchVar = 0;
+    const x = {
+      pace: n / Math.max(hi - lo, 0.5),                       // words per second around here
+      pause: clamp01(1 - voicedSec / Math.max(hi - lo, 0.5)), // fraction of the window that's silence
+      cv: gm > 0 ? stdev(gaps) / gm : 0,                      // rhythm irregularity
+      loud: null, pitch: null, loudStd: null, pitchStd: null,
+    };
     if (f && loudMed != null) {
       const wa = Math.floor(w.s * hz), wb = Math.max(wa + 1, Math.ceil(w.e * hz));
-      const wl = f.loud.slice(wa, wb).filter(x => x > -50);
-      if (wl.length) loudN = clamp01(((wl.reduce((a, b) => a + b, 0) / wl.length - loudMed) + 10) / 20); // ±10dB around the norm
-      const ws = semi.slice(wa, wb).filter(x => x != null);
-      if (ws.length && pitchMed != null) pitchN = clamp01(((ws.reduce((a, b) => a + b, 0) / ws.length - pitchMed) + 6) / 18); // −6 … +12 semitones
+      const wl = f.loud.slice(wa, wb).filter(y => y > -50);
+      if (wl.length) x.loud = wl.reduce((a, b) => a + b, 0) / wl.length - loudMed;        // dB vs the message's norm
+      const ws = semi.slice(wa, wb).filter(y => y != null);
+      if (ws.length && pitchMed != null) x.pitch = ws.reduce((a, b) => a + b, 0) / ws.length - pitchMed; // semitones vs norm
       const a = Math.max(0, Math.floor((c - 1.5) * hz)), b = Math.ceil((c + 1.5) * hz);
-      loudVar = clamp01(std(f.loud.slice(a, b).filter(x => x > -50)) / 8);
-      pitchVar = clamp01(std(semi.slice(a, b).filter(x => x != null)) / 9); // real swings run 3–11 semitones
+      x.loudStd = stdev(f.loud.slice(a, b).filter(y => y > -50));
+      x.pitchStd = stdev(semi.slice(a, b).filter(y => y != null));
     }
-    const has = !!(f && loudMed != null);
-    const energy = has ? 0.35 * paceN + 0.35 * loudN + 0.3 * pitchN : 0.6 * paceN + 0.4 * (1 - clamp01(pauseFrac * 2));
-    const flow = 1 - clamp01(0.5 * clamp01(pauseFrac * 2) + 0.5 * clamp01(cv / 1.2));
-    const tension = has ? clamp01(0.5 * loudVar + 0.5 * pitchVar) : clamp01(cv / 1.2);
-    return { energy, flow, tension };
+    return x;
   });
-  // the raw reads cluster (most speech is medium), so each axis is stretched
-  // over the message's own 10th–90th percentile range — the palette shows
-  // how THIS message varies, not where it sits on an absolute scale. A floor
-  // on the span keeps a genuinely flat message from amplifying noise.
-  const stretch = key => {
-    const arr = v.map(x => x[key]).sort((a, b) => a - b);
-    const lo = arr[Math.floor((arr.length - 1) * 0.1)], hi = arr[Math.floor((arr.length - 1) * 0.9)];
-    const span = Math.max(hi - lo, 0.25), mid = (lo + hi) / 2;
-    for (const x of v) x[key] = clamp01((x[key] - mid) / span + 0.5);
+  msg._raw = { key, v };
+  return v;
+}
+
+// the speaker's typical range per sub-metric, from every message of theirs
+// with words (and a track, for the audio ones) loaded right now
+const profiles = new Map(); // author → { key, p }
+function speakerProfile(author) {
+  const mine = state.messages.filter(m => normName(m.author) === normName(author) && m.words.length);
+  const key = mine.map(m => `${m.id}:${m.words.length}:${m.features ? 1 : 0}`).join(',');
+  const hit = profiles.get(author);
+  if (hit?.key === key) return hit.p;
+  const p = {};
+  for (const k of EXPR_KEYS) {
+    const vals = mine.flatMap(m => (rawFor(m) || []).map(x => x[k]).filter(val => val != null)).sort((a, b) => a - b);
+    const n = vals.length;
+    const own = n ? [quantile(vals, 0.1), quantile(vals, 0.5), quantile(vals, 0.9)] : EXPR_DEFAULT[k];
+    // few words: lean on the defaults until the speaker has shown their range
+    const w = Math.min(1, n / 150);
+    p[k] = own.map((val, i) => val * w + EXPR_DEFAULT[k][i] * (1 - w));
+  }
+  profiles.set(author, { key, p });
+  return p;
+}
+
+function exprFor(msg) {
+  ensureFeatures(msg);
+  const raw = rawFor(msg);
+  if (!raw) return null;
+  const prof = speakerProfile(msg.author);
+  const pkey = JSON.stringify(prof);
+  if (msg._expr?.key === msg._raw.key && msg._expr.pkey === pkey) return msg._expr.v;
+  const norm = (val, k) => {
+    if (val == null) return 0.5;
+    const [lo, , hi] = prof[k];
+    const span = Math.max(hi - lo, EXPR_FLOOR[k]);
+    return clamp01((val - (lo + hi) / 2) / span + 0.5);
   };
-  stretch('energy'); stretch('flow'); stretch('tension');
-  msg._expr = { key, v };
+  const contrast = val => clamp01((val - 0.15) / 0.7); // the middle 70% of the speaker's range spans the palette
+  const v = raw.map(x => ({
+    energy: contrast(0.35 * norm(x.pace, 'pace') + 0.35 * norm(x.loud, 'loud') + 0.3 * norm(x.pitch, 'pitch')),
+    flow: contrast(1 - (0.5 * norm(x.pause, 'pause') + 0.5 * norm(x.cv, 'cv'))),
+    tension: contrast(0.5 * norm(x.loudStd, 'loudStd') + 0.5 * norm(x.pitchStd, 'pitchStd')),
+  }));
+  msg._expr = { key: msg._raw.key, pkey, v };
   return v;
 }
 // brightness = energy (lux is energy), hue = tension (calm blue … tense red,
