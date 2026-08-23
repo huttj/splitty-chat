@@ -3092,17 +3092,6 @@ const exprLCH = (x, text = false) => text
   ? [0.64 + 0.3 * x.energy, 0.05 + 0.17 * x.flow, 264 + 121 * x.tension]
   : [0.52 + 0.38 * x.energy, 0.03 + 0.17 * x.flow, 264 + 121 * x.tension];
 const exprColor = (x, text = false) => oklch(...exprLCH(x, text));
-// a word's gradient: halfway-to-the-previous word at its left edge, its own
-// color in the middle, halfway-to-the-next at its right — so color flows
-// through the line instead of stepping word to word
-const mixLCH = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
-function exprGradient(expr, i, text = false) {
-  const cur = exprLCH(expr[i], text);
-  const prev = i > 0 ? exprLCH(expr[i - 1], text) : cur;
-  const next = i + 1 < expr.length ? exprLCH(expr[i + 1], text) : cur;
-  return `linear-gradient(90deg, ${oklch(...mixLCH(prev, cur, 0.5))}, ${oklch(...cur)} 50%, ${oklch(...mixLCH(cur, next, 0.5))})`;
-}
-
 // Older messages have no track: the author (or an editor) quietly computes
 // one from the stored voice audio and saves it — one at a time, only while
 // the display is on, never for videos without a separate voice track.
@@ -4317,14 +4306,10 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.t = w.s;
       span.dataset.e = w.e;
       span.textContent = w.w;
-      if (expr && exprOn('text')) {
-        span.classList.add('grad');
-        span.style.setProperty('--wg', exprGradient(expr, wi, true));
-      }
-      if (expr && exprOn('highlight')) {
-        span.style.setProperty('--hc', exprColor(expr[wi]));      // solid: the glow
-        span.style.setProperty('--hg', exprGradient(expr, wi));   // gradient: the wash
-      }
+      // one solid color per word (the word's own): per-word gradients looked
+      // great but background-clip:text across thousands of spans crawls
+      if (expr && exprOn('text')) span.style.setProperty('--wc', exprColor(expr[wi], true));
+      if (expr && exprOn('highlight')) span.style.setProperty('--hc', exprColor(expr[wi]));
       span.onclick = () => tapTranscript(msg.id, w.s + 0.001);
       frag.appendChild(span);
       frag.appendChild(document.createTextNode(' '));
