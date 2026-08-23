@@ -603,9 +603,12 @@ function initMenu() {
   // expressiveness: how the speech's energy/flow/tension is shown
   const expr = $('#expr-sel');
   expr.value = state.expr;
+  const paintExpr = () => document.body.classList.toggle('expr-highlight', state.expr === 'highlight');
+  paintExpr();
   expr.onchange = () => {
     state.expr = expr.value;
     localStorage.setItem('splitty:expr', state.expr);
+    paintExpr();
     state.lastRenderKey = '';
     render();
   };
@@ -1370,6 +1373,12 @@ async function poll() {
     }
     hideLocked();
     const data = await res.json();
+    // the feature track is fetched per message and cached on the object —
+    // carry it across polls so it isn't refetched every 2.5s
+    for (const m of data.messages) {
+      const prev = state.byId.get(m.id);
+      if (prev?.features && m.hasFeatures) { m.features = prev.features; m._expr = prev._expr; }
+    }
     state.messages = data.messages;
     state.byId = new Map(data.messages.map(m => [m.id, m]));
     rebuildAuthorColors();
@@ -2083,6 +2092,7 @@ function scrubFocus(vt) {
   if (!state.playlist.length) return;
   const seg = state.playlist[segIdxAt(vt)];
   focusWordAt(seg, seg.start + (vt - seg.vStart), 'scrub-focus');
+  vizPeek(seg.id, seg.start + (vt - seg.vStart)); // the equalizer follows the scrub too
 }
 
 function clearScrubFocus() {
@@ -2746,14 +2756,71 @@ async function harvestAndRetranscribe(msg, btn) {
 // multivariate stream the display — and later, whatever reads the
 // conversation — characterizes a speaker's state from.
 const FEAT_HZ = 4;
+// the stored spectrum: SPEC_N log-spaced points from SPEC_LO to SPEC_HI Hz,
+// one byte each (the analyser's own dB→byte scale, so stored and live match)
+const SPEC_N = 12, SPEC_LO = 70, SPEC_HI = 7000;
+const specHz = i => SPEC_LO * Math.pow(SPEC_HI / SPEC_LO, i / (SPEC_N - 1));
+const dbByte = db => Math.max(0, Math.min(255, Math.round(((db + 100) / 70) * 255)));
+
+// in-place radix-2 FFT (re, im) — small and plenty for a 1024-point window
+function fft(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = i + k, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti;
+        re[a] += tr; im[a] += ti;
+        const ncr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+}
+
+const b64 = {
+  enc: bytes => { // chunked: a spread of a long track would blow the call stack
+    let out = '';
+    for (let i = 0; i < bytes.length; i += 8192) out += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    return btoa(out);
+  },
+  dec: str => Uint8Array.from(atob(str), ch => ch.charCodeAt(0)),
+};
+
 async function audioFeatures(mono, rate) {
   const hop = Math.round(rate / FEAT_HZ), win = Math.round(rate * 0.04);
   const n = Math.floor(mono.length / hop);
   const loud = new Array(n).fill(-60), pitch = new Array(n).fill(0);
+  const spec = new Uint8Array(n * SPEC_N);
   const minLag = Math.round(rate / 400), maxLag = Math.round(rate / 70); // 70–400Hz: speaking voices
+  const FN = 1024, re = new Float32Array(FN), im = new Float32Array(FN);
+  const hann = new Float32Array(FN);
+  for (let j = 0; j < FN; j++) hann[j] = 0.5 - 0.5 * Math.cos((2 * Math.PI * j) / FN);
+  const binHz = rate / FN;
   for (let i = 0; i < n; i++) {
     if (i % 160 === 159) await new Promise(r => setTimeout(r)); // long files: keep the page responsive
     const c = i * hop + (hop >> 1);
+    // spectrum: the loudest bin in each of the log-spaced slices
+    const s0 = Math.max(0, c - FN / 2);
+    for (let j = 0; j < FN; j++) { re[j] = (mono[s0 + j] || 0) * hann[j]; im[j] = 0; }
+    fft(re, im);
+    for (let k = 0; k < SPEC_N; k++) {
+      const lo = k ? Math.sqrt(specHz(k - 1) * specHz(k)) : SPEC_LO * 0.8;
+      const hi = k < SPEC_N - 1 ? Math.sqrt(specHz(k) * specHz(k + 1)) : SPEC_HI;
+      const a = Math.max(1, Math.round(lo / binHz)), b = Math.min(FN / 2, Math.max(a + 1, Math.round(hi / binHz)));
+      let peak = 0;
+      for (let j = a; j < b; j++) peak = Math.max(peak, re[j] * re[j] + im[j] * im[j]);
+      spec[i * SPEC_N + k] = dbByte(20 * Math.log10((Math.sqrt(peak) * 4) / FN + 1e-9)); // hann: ×4/N ≈ sine amplitude
+    }
     const a = Math.max(0, (c - win / 2) | 0), b = Math.min(mono.length, a + win);
     let e = 0;
     for (let j = a; j < b; j++) e += mono[j] * mono[j];
@@ -2784,7 +2851,39 @@ async function audioFeatures(mono, rate) {
     const shift = denom ? Math.min(0.5, Math.max(-0.5, 0.5 * (y0 - y2) / denom)) : 0;
     pitch[i] = rate / (bestLag + shift);
   }
-  return { hz: FEAT_HZ, loud: loud.map(Math.round), pitch: pitch.map(Math.round) };
+  return { hz: FEAT_HZ, loud: loud.map(Math.round), pitch: pitch.map(Math.round), spec: b64.enc(spec) };
+}
+
+// the stored spectrum at a moment, as spectrum-at-Hz (0..1) — the same shape
+// the live analyser gives, so the lines look the same paused or scrubbing
+function storedSpecAt(features, t) {
+  if (!features?.spec) return null;
+  if (!features._spec) features._spec = b64.dec(features.spec);
+  const n = features._spec.length / SPEC_N;
+  const i = Math.min(n - 1, Math.max(0, Math.floor(t * features.hz)));
+  const row = features._spec.subarray(i * SPEC_N, (i + 1) * SPEC_N);
+  const lgLo = Math.log(SPEC_LO), lgSpan = Math.log(SPEC_HI / SPEC_LO);
+  return hz => {
+    const u = ((Math.log(Math.max(hz, SPEC_LO)) - lgLo) / lgSpan) * (SPEC_N - 1);
+    const k = Math.min(SPEC_N - 2, Math.max(0, Math.floor(u))), f = Math.min(1, u - k);
+    return (row[k] * (1 - f) + row[k + 1] * f) / 255;
+  };
+}
+
+// features ride separately from the chat poll (they're the big part of a
+// message) — fetched once per message when something wants them
+const featFetching = new Set();
+function ensureFeatures(msg) {
+  if (!msg || msg.features || !msg.hasFeatures || featFetching.has(msg.id)) return;
+  featFetching.add(msg.id);
+  jfetch(`/api/chats/${state.chatId}/messages/${msg.id}/features`)
+    .then(d => {
+      msg.features = d.features;
+      msg._expr = null;
+      if (state.expr) { state.lastRenderKey = ''; render(); }
+    })
+    .catch(() => {})
+    .finally(() => featFetching.delete(msg.id));
 }
 
 // decode any media blob → 16kHz mono, then loudness correction + the feature track
@@ -2805,6 +2904,7 @@ async function analyzeBlob(blob) {
 const clamp01 = v => Math.min(1, Math.max(0, v));
 const median = arr => { const a = [...arr].sort((x, y) => x - y); return a.length ? a[a.length >> 1] : null; };
 function exprFor(msg) {
+  ensureFeatures(msg);
   const key = `${msg.words.length}|${msg.features ? msg.features.loud.length : 0}`;
   if (msg._expr?.key === key) return msg._expr.v;
   const words = msg.words;
@@ -2875,7 +2975,7 @@ const featBackfill = { tried: new Set(), running: false };
 async function backfillFeatures() {
   if (featBackfill.running || !state.expr) return;
   const msg = state.messages.find(m =>
-    !m.features && m.words.length && !featBackfill.tried.has(m.id)
+    (!m.hasFeatures || (m.features && !m.features.spec)) && m.words.length && !featBackfill.tried.has(m.id)
     && (isMine(m.author) || canEdit()) && (m.audioKey || isAudioMsg(m)));
   if (!msg) return;
   featBackfill.running = true;
@@ -2889,6 +2989,8 @@ async function backfillFeatures() {
       method: 'PUT', headers: JSONH, body: JSON.stringify({ author: state.name, features }),
     });
     msg.features = features;
+    msg.hasFeatures = true;
+    msg._expr = null;
     state.lastRenderKey = '';
     render();
   } catch { /* next one */ } finally {
@@ -3330,7 +3432,6 @@ function playbackAnalyser(el) {
 // band's level. Nothing else moves: silence is six flat lines.
 const VIZ_BANDS = [[60, 250], [250, 500], [500, 1000], [1000, 2000], [2000, 3500], [3500, 7000]];
 const VIZ_N = VIZ_BANDS.length;
-const VIZ_CYCLES = [1.5, 2.5, 3.5, 5, 7, 10]; // wavelengths across the box, bass → treble
 const viz = {
   el: null, ctx2d: null, raf: 0, mode: 'mic',
   bands: new Float32Array(VIZ_N), smooth: new Float32Array(VIZ_N),
@@ -3340,6 +3441,8 @@ const viz = {
   sat: 0,    // how colored the picture is: 0 = white (silence) … 1 = the voice's hue
   f0: null,  // smoothed pitch, Hz
   frame: 0,
+  specAt: null, // hz → 0..1, whatever is feeding the lines right now
+  peek: null,   // { id, t, ts } — the scrub point, while scrubbing
 };
 
 // Pitch → hue, fixed: the hue range is cut in two, the bottom half for low
@@ -3390,15 +3493,28 @@ function livePitch(an) {
   return rate / (bestLag + shift);
 }
 
+// the live spectrum, per bin, smoothed (quick to rise, slow to settle)
+const SPEC_MAX_HZ = 7000;
+let liveBins = null;
 function readBands(an, out) {
   an.getByteFrequencyData(viz.freq);
   const binHz = an.context.sampleRate / an.fftSize;
+  const nb = Math.min(viz.freq.length, Math.ceil(SPEC_MAX_HZ / binHz) + 2);
+  if (!liveBins || liveBins.length !== nb) liveBins = new Float32Array(nb);
+  for (let k = 0; k < nb; k++) {
+    const v = viz.freq[k] / 255, d = v - liveBins[k];
+    liveBins[k] += d * (d > 0 ? 0.5 : 0.12);
+  }
   VIZ_BANDS.forEach(([lo, hi], i) => {
-    const a = Math.max(0, Math.round(lo / binHz)), b = Math.max(a + 1, Math.round(hi / binHz));
+    const a = Math.max(0, Math.round(lo / binHz)), b = Math.min(nb, Math.max(a + 1, Math.round(hi / binHz)));
     let peak = 0;
-    for (let k = a; k < b; k++) if (viz.freq[k] > peak) peak = viz.freq[k]; // the band's loudest bin
-    out[i] = Math.min(1, (peak / 255) * 1.25);
+    for (let k = a; k < b; k++) if (liveBins[k] > peak) peak = liveBins[k]; // the band's loudest bin
+    out[i] = Math.min(1, peak * 1.25);
   });
+  viz.specAt = hz => {
+    const u = hz / binHz, k = Math.min(nb - 2, Math.max(0, Math.floor(u))), f = Math.min(1, u - k);
+    return liveBins[k] * (1 - f) + liveBins[k + 1] * f;
+  };
   // pitch every other frame (it's the costly read); hold through unvoiced stretches
   if ((viz.frame++ & 1) === 0) {
     const f0 = livePitch(an);
@@ -3410,7 +3526,25 @@ function readBands(an, out) {
   }
 }
 
-// no analyser on the playing clip: pulse with the words being spoken
+// paused or scrubbing: the stored track says what the voice looked like at
+// that moment — bands, spectrum shape and pitch — so the picture is honest
+// there too. Returns false when there's nothing stored.
+function storedBands(msg, t, out) {
+  const f = msg?.features;
+  const at = storedSpecAt(f, t);
+  if (!at) return false;
+  viz.specAt = at;
+  VIZ_BANDS.forEach(([lo, hi], i) => {
+    let peak = 0;
+    for (let k = 0; k < 8; k++) peak = Math.max(peak, at(lo * Math.pow(hi / lo, k / 7)));
+    out[i] = Math.min(1, peak * 1.25);
+  });
+  const p = f.pitch[Math.min(f.pitch.length - 1, Math.max(0, Math.floor(t * f.hz)))];
+  if (p > 0) { viz.f0 = p; viz.hue = pitchHue(p); }
+  return true;
+}
+
+// no analyser on the playing clip and no track: pulse with the words being spoken
 function syntheticBands(out, t) {
   const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
   const msg = seg && state.byId.get(seg.id);
@@ -3429,12 +3563,7 @@ function syntheticBands(out, t) {
     const wob = 0.65 + 0.35 * Math.sin(t * (2.1 + i * 0.9) + i * 1.7) * Math.sin(t * 5.3 + i);
     out[i] = viz.syn * wob * (i < 3 ? 1 : 0.6);
   }
-  // the stored track has the pitch — color from that
-  const f = msg?.features;
-  if (f && !el.paused) {
-    const p = f.pitch[Math.floor(el.currentTime * f.hz)];
-    if (p > 0) { viz.f0 = p; viz.hue = pitchHue(p); }
-  }
+  viz.specAt = hz => viz.syn * Math.exp(-hz / 1500);
 }
 
 function showViz(on, mode = viz.mode) {
@@ -3443,6 +3572,9 @@ function showViz(on, mode = viz.mode) {
   viz.el.classList.toggle('hidden', !on);
   if (on && !viz.raf) viz.raf = requestAnimationFrame(vizFrame);
 }
+
+// scrubbing the transcript or the timeline: the lines follow the scrub point
+function vizPeek(msgId, t) { viz.peek = { id: msgId, t, ts: performance.now() }; }
 
 function vizFrame(now) {
   if (viz.el.classList.contains('hidden') || document.hidden) { viz.raf = 0; return; }
@@ -3454,10 +3586,25 @@ function vizFrame(now) {
   if (!W || !H) return;
   if (viz.el.width !== W || viz.el.height !== H) { viz.el.width = W; viz.el.height = H; }
 
-  const an = viz.mode === 'play' ? playbackAnalyser(activeEl()) : micAnalyser;
-  if (an) readBands(an, viz.bands);
-  else if (viz.mode === 'play') syntheticBands(viz.bands, t);
-  else viz.bands.fill(0);
+  let fed = false;
+  if (viz.mode === 'play') {
+    // a scrub in the last moment, or a paused player: read the stored track at that point
+    const peek = viz.peek && now - viz.peek.ts < 300 ? viz.peek : null;
+    const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
+    const cur = seg && state.byId.get(seg.id);
+    const el = activeEl();
+    if (peek) { const m = state.byId.get(peek.id); ensureFeatures(m); fed = storedBands(m, peek.t, viz.bands); }
+    else if (cur && el.paused) { ensureFeatures(cur); fed = storedBands(cur, el.currentTime, viz.bands); }
+    if (!fed) {
+      const an = playbackAnalyser(el);
+      if (an && !el.paused) { readBands(an, viz.bands); fed = true; }
+      else if (!an) { syntheticBands(viz.bands, t); fed = true; }
+    }
+  } else if (micAnalyser) {
+    readBands(micAnalyser, viz.bands);
+    fed = true;
+  }
+  if (!fed) { viz.bands.fill(0); viz.specAt = null; }
   for (let i = 0; i < viz.bands.length; i++) {
     const d = viz.bands[i] - viz.smooth[i];
     viz.smooth[i] += d * (d > 0 ? 0.5 : 0.12); // quick to rise, slow to settle
@@ -3469,6 +3616,7 @@ function vizFrame(now) {
   drawViz(viz.ctx2d, W, H, energy);
 }
 
+const VIZ_PTS = 24; // samples per band across the half-width
 function drawViz(c, W, H, energy) {
   c.globalCompositeOperation = 'source-over';
   const bg = c.createLinearGradient(0, 0, 0, H);
@@ -3483,26 +3631,32 @@ function drawViz(c, W, H, energy) {
   const hue = viz.hue ?? 0;
   const sat = Math.round(85 * viz.sat); // white at rest, the voice's color when it speaks
   const scale = W / 800 + 0.6;
-  const mid = H / 2, span = H * 0.4;
-  const step = Math.max(3, Math.round(W / 200));
+  const mid = H / 2, span = H * 0.42, half = W / 2;
+  const at = viz.specAt;
   for (let r = 0; r < VIZ_N; r++) {
     const level = viz.smooth[r];
+    const [lo, hi] = VIZ_BANDS[r];
     const shade = r / (VIZ_N - 1);      // 0 = bass (dark) … 1 = treble (light)
     const light = (30 + 48 * shade) * viz.sat + (58 + 30 * shade) * (1 - viz.sat);
-    const amp = span * level * (r < 2 ? 1 : 0.8);
-    const cyc = VIZ_CYCLES[r], ph = r * 0.9; // fixed phases: the lines never drift
-    c.beginPath();
-    for (let x = 0; x <= W + step; x += step) {
-      const u = Math.min(x / W, 1);
-      const env = Math.sin(u * Math.PI);  // converge at the edges, swell in the middle
-      const y = mid + Math.sin(u * cyc * 2 * Math.PI + ph) * amp * env;
-      x ? c.lineTo(x, y) : c.moveTo(x, y);
+    const flip = r % 2 ? -1 : 1;        // alternate bands rise above / fall below the midline
+    // this band's slice of the spectrum, low edge at the center of the box,
+    // high edge at the right — mirrored to the left, so each line is the
+    // true shape of its own piece of the sound
+    const ys = [];
+    for (let k = 0; k <= VIZ_PTS; k++) {
+      const hz = lo * Math.pow(hi / lo, k / VIZ_PTS);
+      const v = at ? Math.min(1, at(hz) * 1.25) : 0;
+      ys.push(mid + flip * v * span * (r < 2 ? 1 : 0.85));
     }
+    c.beginPath();
+    for (let k = VIZ_PTS; k >= 0; k--) { const x = half - (k / VIZ_PTS) * half; k === VIZ_PTS ? c.moveTo(x, ys[k]) : c.lineTo(x, ys[k]); }
+    for (let k = 1; k <= VIZ_PTS; k++) c.lineTo(half + (k / VIZ_PTS) * half, ys[k]);
     // thin, with a real neon blur — width never changes with volume
     c.shadowColor = `hsla(${hue}, ${sat}%, ${light + 10}%, ${0.4 + 0.6 * level})`;
     c.shadowBlur = 14 * scale;
     c.strokeStyle = `hsla(${hue}, ${sat}%, ${light + 22}%, ${0.4 + 0.6 * level})`;
     c.lineWidth = 1.3 * scale;
+    c.lineJoin = 'round';
     c.stroke();
     c.shadowBlur = 0;
   }

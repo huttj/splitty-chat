@@ -309,8 +309,10 @@ body.dragging-anchor .word { cursor: grabbing; }
   cursor: ns-resize; touch-action: none;
   background-color: #1b1e27; background-repeat: no-repeat;
 }
-/* colored-highlighter mode: the playhead wash takes the word's expressiveness color */
+/* colored-highlighter mode: the playhead wash takes the word's expressiveness
+   color — it's bright, so the word itself goes dark to stay readable */
 .word.speaking, .word.scrub-focus { --hl: var(--hc, rgba(124, 92, 255, 0.5)); }
+body.expr-highlight .word.speaking, body.expr-highlight .word.scrub-focus { color: #0e1016; }
 /* playback + scrubbing: steady baseline wash over the whole word,
    with a brighter focal hotspot sliding through at the interpolated position */
 .word.speaking,

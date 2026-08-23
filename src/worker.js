@@ -194,19 +194,21 @@ const rowToMessage = r => ({
   audioKey: r.audio_key || null,
   layer: r.layer_user_id || null,
   userId: r.user_id || null,
-  features: r.features ? JSON.parse(r.features) : null,
+  hasFeatures: !!r.features, // the track itself is fetched per message — it's the heavy part
 });
 
 // the expressiveness track: a small, fixed-shape JSON blob the client computes
 // from the audio — loudness (dBFS, ints) and pitch (Hz, 0 = unvoiced) at `hz`
 // samples a second. Validated to shape and size; never trusted for anything else.
 function cleanFeatures(raw) {
-  if (typeof raw !== 'string' || !raw || raw.length > 96 * 1024) return null;
+  if (typeof raw !== 'string' || !raw || raw.length > 512 * 1024) return null;
   try {
     const f = JSON.parse(raw);
     const ok = arr => Array.isArray(arr) && arr.length <= 20000 && arr.every(v => Number.isFinite(v));
     if (!f || !(f.hz >= 1 && f.hz <= 10) || !ok(f.loud) || !ok(f.pitch) || f.loud.length !== f.pitch.length) return null;
-    return JSON.stringify({ hz: f.hz, loud: f.loud.map(v => Math.round(v)), pitch: f.pitch.map(v => Math.round(v)) });
+    // optional spectrum: base64 of 12 bytes per sample
+    const spec = typeof f.spec === 'string' && /^[A-Za-z0-9+/=]*$/.test(f.spec) && f.spec.length <= 400 * 1024 ? f.spec : null;
+    return JSON.stringify({ hz: f.hz, loud: f.loud.map(v => Math.round(v)), pitch: f.pitch.map(v => Math.round(v)), ...(spec && { spec }) });
   } catch {
     return null;
   }
@@ -900,6 +902,22 @@ export default {
         return json({ ok: true });
       }
 
+      // the expressiveness track, on demand — anyone who can see the chat
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)\/features$/)) && request.method === 'GET') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        if (authEnabled(env) && !access.role) return json({ error: 'no access' }, 403);
+        const row = await env.DB.prepare('SELECT features, layer_user_id FROM messages WHERE id = ? AND chat_id = ?')
+          .bind(m[2], m[1]).first();
+        if (!row) return json({ error: 'not found' }, 404);
+        if (row.layer_user_id && access.role !== 'editor' && row.layer_user_id !== user?.id) return json({ error: 'no access' }, 403);
+        return new Response(`{"features":${row.features || 'null'}}`, {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'private, max-age=3600' },
+        });
+      }
+
       // backfill the expressiveness track for an older message (the client
       // decodes the stored audio and computes it) — author or editor
       if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)\/features$/)) && request.method === 'PUT') {
@@ -1207,7 +1225,7 @@ async function createMessage(request, env, ctx, chatId) {
     `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, audio_key, layer_user_id, duration_ms, gain, created_at, transcript_status, features)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
   ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, audioKey, msg.layer, msg.durationMs, msg.gain, msg.createdAt, features).run();
-  if (features) msg.features = JSON.parse(features);
+  msg.hasFeatures = !!features;
 
   // transcribe after the response goes out; client polls for the result.
   // Push notifications wait for the transcript so they can quote the message.
