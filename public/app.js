@@ -3261,11 +3261,12 @@ function drawViz(c, W, H, t, b) {
     // crest: a wide soft halo under a thin line, both a step lighter than the body
     c.beginPath();
     crest.forEach((y, i) => (i ? c.lineTo(i * step, y) : c.moveTo(0, y)));
+    // (constant widths — volume moves and brightens the ribbons, never thickens them)
     c.strokeStyle = `hsla(${hue}, 90%, ${light + 8}%, ${0.12 + 0.3 * level})`;
-    c.lineWidth = (6 + 10 * level) * scale;
+    c.lineWidth = 8 * scale;
     c.stroke();
     c.strokeStyle = `hsla(${hue}, 90%, ${light + 18}%, ${0.3 + 0.45 * level})`;
-    c.lineWidth = (1.2 + 1.8 * level) * scale;
+    c.lineWidth = 1.6 * scale;
     c.stroke();
   }
   // a soft core that swells with the voice — the lightest tint of the same hue
