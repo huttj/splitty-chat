@@ -2945,7 +2945,7 @@ function exprFor(msg) {
       starts.push(words[k].s);
       voicedSec += Math.min(words[k].e, hi) - Math.max(words[k].s, lo);
     }
-    const paceN = clamp01(((n / Math.max(hi - lo, 0.5)) - 1.2) / 2.8); // 1.2 wps slow … 4 wps fast
+    const paceN = clamp01(((n / Math.max(hi - lo, 0.5)) - 1) / 5); // 1 wps slow … 6 wps fast (real speech hits 6)
     const pauseFrac = clamp01(1 - voicedSec / Math.max(hi - lo, 0.5));
     // rhythm: spread of the gaps between word onsets (coefficient of variation)
     const gaps = [];
@@ -2956,12 +2956,12 @@ function exprFor(msg) {
     if (f && loudMed != null) {
       const wa = Math.floor(w.s * hz), wb = Math.max(wa + 1, Math.ceil(w.e * hz));
       const wl = f.loud.slice(wa, wb).filter(x => x > -50);
-      if (wl.length) loudN = clamp01(((wl.reduce((a, b) => a + b, 0) / wl.length - loudMed) + 8) / 16);
+      if (wl.length) loudN = clamp01(((wl.reduce((a, b) => a + b, 0) / wl.length - loudMed) + 10) / 20); // ±10dB around the norm
       const ws = semi.slice(wa, wb).filter(x => x != null);
-      if (ws.length && pitchMed != null) pitchN = clamp01(((ws.reduce((a, b) => a + b, 0) / ws.length - pitchMed) + 6) / 12);
+      if (ws.length && pitchMed != null) pitchN = clamp01(((ws.reduce((a, b) => a + b, 0) / ws.length - pitchMed) + 6) / 18); // −6 … +12 semitones
       const a = Math.max(0, Math.floor((c - 1.5) * hz)), b = Math.ceil((c + 1.5) * hz);
       loudVar = clamp01(std(f.loud.slice(a, b).filter(x => x > -50)) / 8);
-      pitchVar = clamp01(std(semi.slice(a, b).filter(x => x != null)) / 4);
+      pitchVar = clamp01(std(semi.slice(a, b).filter(x => x != null)) / 9); // real swings run 3–11 semitones
     }
     const has = !!(f && loudMed != null);
     const energy = has ? 0.35 * paceN + 0.35 * loudN + 0.3 * pitchN : 0.6 * paceN + 0.4 * (1 - clamp01(pauseFrac * 2));
@@ -2969,6 +2969,17 @@ function exprFor(msg) {
     const tension = has ? clamp01(0.5 * loudVar + 0.5 * pitchVar) : clamp01(cv / 1.2);
     return { energy, flow, tension };
   });
+  // the raw reads cluster (most speech is medium), so each axis is stretched
+  // over the message's own 10th–90th percentile range — the palette shows
+  // how THIS message varies, not where it sits on an absolute scale. A floor
+  // on the span keeps a genuinely flat message from amplifying noise.
+  const stretch = key => {
+    const arr = v.map(x => x[key]).sort((a, b) => a - b);
+    const lo = arr[Math.floor((arr.length - 1) * 0.1)], hi = arr[Math.floor((arr.length - 1) * 0.9)];
+    const span = Math.max(hi - lo, 0.25), mid = (lo + hi) / 2;
+    for (const x of v) x[key] = clamp01((x[key] - mid) / span + 0.5);
+  };
+  stretch('energy'); stretch('flow'); stretch('tension');
   msg._expr = { key, v };
   return v;
 }
@@ -2996,8 +3007,8 @@ function oklch(L, C, h) {
 // 264° blue → 385°≡25° red. Text is a thin stroke and reads dimmer than the
 // same color filling an area, so the word variant is lifted to match by eye.
 const exprColor = (x, text = false) => text
-  ? oklch(0.7 + 0.24 * x.energy, 0.06 + 0.14 * x.flow, 264 + 121 * x.tension)
-  : oklch(0.58 + 0.28 * x.energy, 0.035 + 0.13 * x.flow, 264 + 121 * x.tension);
+  ? oklch(0.64 + 0.3 * x.energy, 0.05 + 0.17 * x.flow, 264 + 121 * x.tension)
+  : oklch(0.52 + 0.38 * x.energy, 0.03 + 0.17 * x.flow, 264 + 121 * x.tension);
 
 // Older messages have no track: the author (or an editor) quietly computes
 // one from the stored voice audio and saves it — one at a time, only while
