@@ -579,10 +579,14 @@ function initMenu() {
   };
   lag.value = state.wordLag;
   paintLag();
+  let lagTimer = null;
   lag.oninput = () => {
     state.wordLag = +lag.value;
     localStorage.setItem('splitty:wordlag', String(state.wordLag));
     paintLag();
+    // the expressiveness colors sample the audio at this lag — re-read them
+    clearTimeout(lagTimer);
+    lagTimer = setTimeout(() => { if (state.expr) { state.lastRenderKey = ''; render(); } }, 200);
   };
 
   // silence-trim shoulder: how much breathing room stays around words when
@@ -2933,7 +2937,10 @@ const EXPR_FLOOR = { pace: 1.2, pause: 0.15, cv: 0.3, loud: 5, pitch: 5, loudStd
 const EXPR_DEFAULT = { pace: [1.5, 2.8, 5.4], pause: [0.08, 0.24, 0.35], cv: [0.5, 0.7, 0.96], loud: [-7.5, -1, 7], pitch: [-3.2, 1.3, 8.8], loudStd: [1.5, 4.6, 6], pitchStd: [0.9, 3.3, 6.8] };
 
 function rawFor(msg) {
-  const key = `${msg.words.length}|${msg.features ? msg.features.loud.length : 0}`;
+  // Whisper's stamps run early; the audio is sampled at the same lag the
+  // word glow uses, so the colors and the voice line up
+  const lag = state.wordLag;
+  const key = `${msg.words.length}|${msg.features ? msg.features.loud.length : 0}|${lag}`;
   if (msg._raw?.key === key) return msg._raw.v;
   const words = msg.words;
   if (!words.length) return null;
@@ -2968,12 +2975,12 @@ function rawFor(msg) {
       loud: null, pitch: null, loudStd: null, pitchStd: null,
     };
     if (f && loudMed != null) {
-      const wa = Math.floor(w.s * hz), wb = Math.max(wa + 1, Math.ceil(w.e * hz));
+      const wa = Math.max(0, Math.floor((w.s + lag) * hz)), wb = Math.max(wa + 1, Math.ceil((w.e + lag) * hz));
       const wl = f.loud.slice(wa, wb).filter(y => y > -50);
       if (wl.length) x.loud = wl.reduce((a, b) => a + b, 0) / wl.length - loudMed;        // dB vs the message's norm
       const ws = semi.slice(wa, wb).filter(y => y != null);
       if (ws.length && pitchMed != null) x.pitch = ws.reduce((a, b) => a + b, 0) / ws.length - pitchMed; // semitones vs norm
-      const a = Math.max(0, Math.floor((c - 1.5) * hz)), b = Math.ceil((c + 1.5) * hz);
+      const a = Math.max(0, Math.floor((c + lag - 1.5) * hz)), b = Math.ceil((c + lag + 1.5) * hz);
       x.loudStd = stdev(f.loud.slice(a, b).filter(y => y > -50));
       x.pitchStd = stdev(semi.slice(a, b).filter(y => y != null));
     }
@@ -2988,7 +2995,7 @@ function rawFor(msg) {
 const profiles = new Map(); // author → { key, p }
 function speakerProfile(author) {
   const mine = state.messages.filter(m => normName(m.author) === normName(author) && m.words.length);
-  const key = mine.map(m => `${m.id}:${m.words.length}:${m.features ? 1 : 0}`).join(',');
+  const key = mine.map(m => `${m.id}:${m.words.length}:${m.features ? 1 : 0}`).join(',') + `|${state.wordLag}`;
   const hit = profiles.get(author);
   if (hit?.key === key) return hit.p;
   const p = {};
