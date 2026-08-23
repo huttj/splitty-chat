@@ -3153,8 +3153,15 @@ const viz = {
   el: null, ctx2d: null, raf: 0, mode: 'mic',
   bands: new Float32Array(VIZ_BANDS.length), smooth: new Float32Array(VIZ_BANDS.length),
   freq: new Uint8Array(128), syn: 0, t0: performance.now(),
+  hue: null, // tonal hue from the spectrum — null until a real spectrum has been read
 };
 
+// color follows the voice: the spectral centroid (where the sound's energy
+// sits, in Hz) maps to hue — a deep voice glows red/orange, a bright one
+// runs through green toward blue/violet. Smoothed so it glides; silence
+// holds the last color instead of snapping to noise.
+// speech centroids (harmonics included) run ~500Hz for a deep voice to ~2kHz for a bright one
+const CENTROID_LO = Math.log(350), CENTROID_HI = Math.log(2800);
 function readBands(an, out) {
   an.getByteFrequencyData(viz.freq);
   VIZ_BANDS.forEach(([a, b], i) => {
@@ -3162,6 +3169,17 @@ function readBands(an, out) {
     for (let k = a; k < b; k++) sum += viz.freq[k];
     out[i] = Math.min(1, (sum / (b - a) / 255) * 1.4);
   });
+  const binHz = an.context.sampleRate / an.fftSize;
+  let wsum = 0, msum = 0;
+  for (let k = 1; k < 64; k++) { // up to ~12kHz — voice lives well inside this
+    const m = viz.freq[k] * viz.freq[k]; // power-weighted: peaks dominate
+    wsum += m * k * binHz;
+    msum += m;
+  }
+  if (msum < 255 * 255) return; // too quiet to judge — hold the color
+  const f = Math.min(Math.max(Math.log(wsum / msum), CENTROID_LO), CENTROID_HI);
+  const target = ((f - CENTROID_LO) / (CENTROID_HI - CENTROID_LO)) * 270; // red → violet
+  viz.hue = viz.hue == null ? target : viz.hue + (target - viz.hue) * 0.06;
 }
 
 // no analyser on the playing clip: pulse with the words being spoken
@@ -3204,7 +3222,7 @@ function vizFrame(now) {
 
   const an = viz.mode === 'play' ? playbackAnalyser(activeEl()) : micAnalyser;
   if (an) readBands(an, viz.bands);
-  else if (viz.mode === 'play') syntheticBands(viz.bands, t);
+  else if (viz.mode === 'play') { viz.hue = null; syntheticBands(viz.bands, t); }
   else viz.bands.fill(0.06);
   for (let i = 0; i < viz.bands.length; i++) {
     const d = viz.bands[i] - viz.smooth[i];
@@ -3223,10 +3241,11 @@ function drawViz(c, W, H, t, b) {
   c.fillRect(0, 0, W, H);
   c.globalCompositeOperation = 'lighter'; // ribbons add up into glow where they cross
 
-  // one hue at a time, drifting slowly around the wheel; the ribbons are its
-  // gradient — the lowest frequency band is the darkest, the highest the
-  // lightest — so the picture reads as a single color breathing
-  const hue = (t * 3) % 360; // ~2 minutes around the wheel
+  // one hue at a time — the voice's tonal color when a spectrum is being
+  // read, else a slow drift around the wheel; the ribbons are its gradient,
+  // lowest frequency band darkest through highest lightest, so the picture
+  // reads as a single color breathing
+  const hue = viz.hue ?? (t * 3) % 360;
   const N = 6, step = Math.max(3, Math.round(W / 160));
   const scale = W / 800 + 0.6;
   for (let r = 0; r < N; r++) {
