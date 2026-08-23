@@ -275,7 +275,7 @@ body.dragging-anchor .word { cursor: grabbing; }
 }
 
 .msg-body { font-size: 16px; }
-.word { cursor: pointer; border-radius: 3px; padding: 0 1px; }
+.word { cursor: pointer; border-radius: 3px; padding: 0 1px; color: var(--wc, inherit); } /* --wc: expressiveness tint */
 .word:hover { background: var(--accent-soft); }
 /* silences between words, width scaled to the pause length; tap to play from the pause */
 .gap {
@@ -301,7 +301,12 @@ body.dragging-anchor .word { cursor: grabbing; }
     rgba(124, 92, 255, 0.5);
   box-shadow: 0 0 14px rgba(124, 92, 255, 0.5);
 }
-.word.unseen { background: rgba(255, 209, 102, 0.16); color: var(--new); }
+.word.unseen { background: rgba(255, 209, 102, 0.16); color: var(--wc, var(--new)); }
+/* expressiveness heat strip: the message's timeline, word by word */
+.heat {
+  height: 5px; border-radius: 3px; margin: 2px 0 9px; cursor: pointer;
+  background-color: #1b1e27; background-repeat: no-repeat;
+}
 /* playback + scrubbing: steady baseline wash over the whole word,
    with a brighter focal hotspot sliding through at the interpolated position */
 .word.speaking,
@@ -652,7 +657,7 @@ body.role-viewer #screen-btn, body.role-viewer #cam-btn { display: none; }
 #menu-devices label, #menu-tuning label { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 4px; }
 #menu-tuning input[type=range] { accent-color: var(--accent); }
 #menu-tuning b { color: var(--text); font-variant-numeric: tabular-nums; }
-#menu-devices select {
+#menu-devices select, #menu-tuning select {
   background: var(--bg); color: var(--text); border: 1px solid #2e3342;
   border-radius: 8px; padding: 7px 8px; font-size: 13px; max-width: 240px;
 }

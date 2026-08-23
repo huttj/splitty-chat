@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS messages (
   gain REAL DEFAULT 1,     -- client-measured loudness correction; added to live DB 2026-08-14 via ALTER
   screen_key TEXT,         -- companion screen-share video in R2; added to live DB 2026-08-15 via ALTER
   audio_key TEXT,          -- stored voice track (retranscription source); added to live DB 2026-08-15 via ALTER
-  layer_user_id TEXT       -- NULL = base conversation; else the commenter whose private layer this belongs to. ALTER 2026-08-15
+  layer_user_id TEXT,      -- NULL = base conversation; else the commenter whose private layer this belongs to. ALTER 2026-08-15
+  features TEXT            -- client-computed expressiveness track {hz, loud[], pitch[]}; added to live DB 2026-08-23 via ALTER
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_chat ON messages(chat_id);

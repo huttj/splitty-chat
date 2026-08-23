@@ -48,6 +48,8 @@ const state = {
   silPad: (v => Number.isFinite(v) ? v : 0.7)(parseFloat(localStorage.getItem('splitty:silpad'))),
   // minimum silence that must survive the shoulders for a pause to be trimmed
   silMin: (v => Number.isFinite(v) ? v : 0.25)(parseFloat(localStorage.getItem('splitty:silmin'))),
+  // expressiveness display: '' (off) | 'strip' (heat bar per message) | 'text' (colored words)
+  expr: localStorage.getItem('splitty:expr') || '',
   // a pause this long breaks the transcript into a new paragraph — tunable
   parPause: (v => Number.isFinite(v) ? v : 1.2)(parseFloat(localStorage.getItem('splitty:parpause'))),
   // hide your own floating preview while watching (camera stays on)
@@ -307,27 +309,6 @@ function setMsgGain(el, msg) {
     el.volume = 1;
   } else {
     el.volume = Math.min(1, Math.max(0.05, (msg?.gain || 1) / chatGainNorm()));
-  }
-}
-
-// average RMS of the non-silent blocks, mapped to a bounded correction gain
-async function measureGain(blob) {
-  try {
-    const ctx = new OfflineAudioContext(1, 8000, 16000);
-    const buf = await ctx.decodeAudioData(await blob.arrayBuffer());
-    const data = buf.getChannelData(0);
-    let sum = 0, n = 0;
-    for (let i = 0; i < data.length; i += 2048) {
-      let s = 0;
-      const end = Math.min(i + 2048, data.length);
-      for (let j = i; j < end; j++) s += data[j] * data[j];
-      const rms = Math.sqrt(s / (end - i));
-      if (rms > 0.01) { sum += rms; n++; } // skip silence so pauses don't skew it
-    }
-    if (!n) return 1;
-    return Math.min(Math.max(0.1 / (sum / n), 0.5), 4); // target ≈ -20 dBFS
-  } catch {
-    return 1;
   }
 }
 
@@ -618,6 +599,15 @@ function initMenu() {
     localStorage.setItem('splitty:silpad', String(state.silPad));
     paintPad();
     trimChanged();
+  };
+  // expressiveness: how the speech's energy/flow/tension is shown
+  const expr = $('#expr-sel');
+  expr.value = state.expr;
+  expr.onchange = () => {
+    state.expr = expr.value;
+    localStorage.setItem('splitty:expr', state.expr);
+    state.lastRenderKey = '';
+    render();
   };
   // a pause this long starts a new paragraph in the transcript
   const par = $('#par-range'), parLabel = $('#par-label');
@@ -1789,6 +1779,7 @@ function playSegment(idx, offset, autoplay = true) {
     state.playlist.slice(idx + 1, idx + 4).map(s => state.byId.get(s.id)?.file),
     true
   );
+  if (state.playLabel !== msg.author) vizResetSpeaker(); // new voice, new color range
   state.playLabel = msg.author;
   loadScreenFor(msg, at);
   updateStage();
@@ -2636,10 +2627,10 @@ async function uploadJob(job) {
     uploader.progress = Math.min(99, Math.max(1, Math.round((sent / total) * 100)));
     updateHint();
   };
-  // voice clip: the media file is the voice track — the server transcribes
-  // it in place; loudness is measured here, alongside the upload
-  const voiceGain = !job.audioBlob && !job.audioPromise && videoBlob.type.startsWith('audio/')
-    ? measureGain(videoBlob) : null;
+  // recordings: loudness + the expressiveness track come from the voice
+  // track (or the voice clip itself), decoded alongside the upload; file
+  // uploads get theirs from the PCM they're already extracting
+  const analysis = job.audioPromise ? null : analyzeBlob(job.audioBlob?.size ? job.audioBlob : videoBlob);
   if (!job.videoKey) job.videoKey = await chunkUpload(videoBlob, onBytes);
   if (screenBlob && screenBlob.size && !job.screenKey) job.screenKey = await chunkUpload(screenBlob, onBytes);
 
@@ -2651,9 +2642,10 @@ async function uploadJob(job) {
     job.audioPromise = null;
   }
   let audioBlob = job.audioBlob;
-  let pcmGain = null;
+  let pcmGain = null, features = null;
   if (pcm && !audioBlob) {
     pcmGain = gainFromSamples(pcm.mono);
+    features = await audioFeatures(pcm.mono, pcm.rate);
     if ((job.durationMs || 0) > 240_000) {
       // long clip: transcript arrives as a serial chunk stream after the post
       job.chunks = splitAudio(pcm.mono, pcm.rate);
@@ -2666,15 +2658,18 @@ async function uploadJob(job) {
   const fd = new FormData();
   fd.append('videoKey', job.videoKey);
   if (job.screenKey) fd.append('screenKey', job.screenKey);
+  if (analysis) {
+    const an = await analysis;
+    pcmGain = an.gain;
+    features = an.features;
+  }
   if (audioBlob && audioBlob.size) {
     fd.append('audio', audioBlob, `audio.${audioBlob.type.includes('mp4') ? 'm4a' : audioBlob.type.includes('wav') ? 'wav' : 'webm'}`);
-    fd.append('gain', String(pcmGain ?? await measureGain(audioBlob)));
   } else if (job.chunks) {
     fd.append('chunkedTranscript', '1');
-    if (pcmGain != null) fd.append('gain', String(pcmGain));
-  } else if (voiceGain) {
-    fd.append('gain', String(await voiceGain));
   }
+  if (pcmGain != null) fd.append('gain', String(pcmGain));
+  if (features) fd.append('features', JSON.stringify(features));
   fd.append('author', state.name || 'anon');
   fd.append('durationMs', String(job.durationMs));
   const lang = localStorage.getItem('splitty:lang');
@@ -2742,6 +2737,163 @@ async function harvestAndRetranscribe(msg, btn) {
   } catch {
     showToast("Couldn't extract audio from that video on this device");
     if (btn) btn.disabled = false;
+  }
+}
+
+// ---------- expressiveness ----------
+// A compact feature track per message, computed once from the audio in the
+// browser and stored: loudness (dBFS) and pitch (Hz; 0 = unvoiced) at FEAT_HZ
+// samples a second. Together with the word timings (pace, pauses) it's the
+// multivariate stream the display — and later, whatever reads the
+// conversation — characterizes a speaker's state from.
+const FEAT_HZ = 4;
+async function audioFeatures(mono, rate) {
+  const hop = Math.round(rate / FEAT_HZ), win = Math.round(rate * 0.04);
+  const n = Math.floor(mono.length / hop);
+  const loud = new Array(n).fill(-60), pitch = new Array(n).fill(0);
+  const minLag = Math.round(rate / 400), maxLag = Math.round(rate / 70); // 70–400Hz: speaking voices
+  for (let i = 0; i < n; i++) {
+    if (i % 160 === 159) await new Promise(r => setTimeout(r)); // long files: keep the page responsive
+    const c = i * hop + (hop >> 1);
+    const a = Math.max(0, (c - win / 2) | 0), b = Math.min(mono.length, a + win);
+    let e = 0;
+    for (let j = a; j < b; j++) e += mono[j] * mono[j];
+    const db = 20 * Math.log10(Math.sqrt(e / Math.max(1, b - a)) + 1e-6);
+    loud[i] = Math.max(-60, Math.min(0, db));
+    const len = b - a - maxLag;
+    if (db < -45 || len < minLag) continue; // silence / clipped window: unvoiced
+    // normalized autocorrelation; the shortest lag near the best score wins
+    // (the true period, not its subharmonic)
+    let e0 = 0;
+    for (let j = a; j < a + len; j++) e0 += mono[j] * mono[j];
+    let best = 0, bestLag = 0;
+    const scores = new Float32Array(maxLag + 1);
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let sum = 0, e1 = 0;
+      for (let j = a; j < a + len; j++) { sum += mono[j] * mono[j + lag]; e1 += mono[j + lag] * mono[j + lag]; }
+      const r = sum / Math.sqrt(e0 * e1 + 1e-9);
+      scores[lag] = r;
+      if (r > best) { best = r; bestLag = lag; }
+    }
+    if (best < 0.6) continue;
+    for (let lag = minLag + 1; lag < bestLag; lag++) {
+      if (scores[lag] >= best * 0.9 && scores[lag] >= scores[lag - 1] && scores[lag] >= scores[lag + 1]) { bestLag = lag; break; }
+    }
+    // parabolic refinement around the peak: sub-sample period, true pitch
+    const y0 = scores[bestLag - 1] || 0, y1 = scores[bestLag], y2 = scores[bestLag + 1] || 0;
+    const denom = y0 - 2 * y1 + y2;
+    const shift = denom ? Math.min(0.5, Math.max(-0.5, 0.5 * (y0 - y2) / denom)) : 0;
+    pitch[i] = rate / (bestLag + shift);
+  }
+  return { hz: FEAT_HZ, loud: loud.map(Math.round), pitch: pitch.map(Math.round) };
+}
+
+// decode any media blob → 16kHz mono, then loudness correction + the feature track
+async function analyzeBlob(blob) {
+  try {
+    const pcm = await extractAudio(blob);
+    return { gain: gainFromSamples(pcm.mono), features: await audioFeatures(pcm.mono, pcm.rate) };
+  } catch {
+    return { gain: 1, features: null };
+  }
+}
+
+// per-word reads, each 0..1, derived from the track + word timings:
+//   energy  — pace, loudness above the message's norm, pitch above the speaker's norm
+//   flow    — smoothness: few pauses, even rhythm (vs. choppy, searching)
+//   tension — punchiness: loudness and pitch swinging hard over a short span
+// Heuristics, openly: they are how the numbers are read, not ground truth.
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const median = arr => { const a = [...arr].sort((x, y) => x - y); return a.length ? a[a.length >> 1] : null; };
+function exprFor(msg) {
+  const key = `${msg.words.length}|${msg.features ? msg.features.loud.length : 0}`;
+  if (msg._expr?.key === key) return msg._expr.v;
+  const words = msg.words;
+  if (!words.length) return null;
+  const f = msg.features, hz = f?.hz || 0;
+  const dur = msgDur(msg);
+  let loudMed = null, pitchMed = null, semi = null;
+  if (f) {
+    loudMed = median(f.loud.filter(v => v > -50));
+    semi = f.pitch.map(p => (p > 0 ? 12 * Math.log2(p / 100) : null));
+    const voiced = semi.filter(v => v != null);
+    pitchMed = voiced.length >= 8 ? median(voiced) : null;
+  }
+  const std = arr => {
+    if (arr.length < 2) return 0;
+    const m = arr.reduce((a, b) => a + b, 0) / arr.length;
+    return Math.sqrt(arr.reduce((a, b) => a + (b - m) ** 2, 0) / arr.length);
+  };
+  const centers = words.map(w => (w.s + w.e) / 2);
+  const v = words.map((w, i) => {
+    const c = centers[i];
+    // pace: words per second around here
+    const lo = Math.max(0, c - 2.5), hi = Math.min(dur, c + 2.5);
+    let n = 0, voicedSec = 0;
+    const starts = [];
+    for (let k = 0; k < words.length; k++) {
+      if (centers[k] < lo || centers[k] > hi) continue;
+      n++;
+      starts.push(words[k].s);
+      voicedSec += Math.min(words[k].e, hi) - Math.max(words[k].s, lo);
+    }
+    const paceN = clamp01(((n / Math.max(hi - lo, 0.5)) - 1.2) / 2.8); // 1.2 wps slow … 4 wps fast
+    const pauseFrac = clamp01(1 - voicedSec / Math.max(hi - lo, 0.5));
+    // rhythm: spread of the gaps between word onsets (coefficient of variation)
+    const gaps = [];
+    for (let k = 1; k < starts.length; k++) gaps.push(starts[k] - starts[k - 1]);
+    const gm = gaps.length ? gaps.reduce((a, b) => a + b, 0) / gaps.length : 0;
+    const cv = gm > 0 ? std(gaps) / gm : 0;
+    let loudN = 0.5, pitchN = 0.5, loudVar = 0, pitchVar = 0;
+    if (f && loudMed != null) {
+      const wa = Math.floor(w.s * hz), wb = Math.max(wa + 1, Math.ceil(w.e * hz));
+      const wl = f.loud.slice(wa, wb).filter(x => x > -50);
+      if (wl.length) loudN = clamp01(((wl.reduce((a, b) => a + b, 0) / wl.length - loudMed) + 8) / 16);
+      const ws = semi.slice(wa, wb).filter(x => x != null);
+      if (ws.length && pitchMed != null) pitchN = clamp01(((ws.reduce((a, b) => a + b, 0) / ws.length - pitchMed) + 6) / 12);
+      const a = Math.max(0, Math.floor((c - 1.5) * hz)), b = Math.ceil((c + 1.5) * hz);
+      loudVar = clamp01(std(f.loud.slice(a, b).filter(x => x > -50)) / 8);
+      pitchVar = clamp01(std(semi.slice(a, b).filter(x => x != null)) / 4);
+    }
+    const has = !!(f && loudMed != null);
+    const energy = has ? 0.35 * paceN + 0.35 * loudN + 0.3 * pitchN : 0.6 * paceN + 0.4 * (1 - clamp01(pauseFrac * 2));
+    const flow = 1 - clamp01(0.5 * clamp01(pauseFrac * 2) + 0.5 * clamp01(cv / 1.2));
+    const tension = has ? clamp01(0.5 * loudVar + 0.5 * pitchVar) : clamp01(cv / 1.2);
+    return { energy, flow, tension };
+  });
+  msg._expr = { key, v };
+  return v;
+}
+// energy → hue (cool blue … hot red), tension → saturation (calm grey … vivid), flow → lightness (choppy dim … smooth bright)
+const exprColor = x =>
+  `hsl(${Math.round(215 - 215 * x.energy)}, ${Math.round(35 + 65 * x.tension)}%, ${Math.round(40 + 24 * x.flow)}%)`;
+
+// Older messages have no track: the author (or an editor) quietly computes
+// one from the stored voice audio and saves it — one at a time, only while
+// the display is on, never for videos without a separate voice track.
+const featBackfill = { tried: new Set(), running: false };
+async function backfillFeatures() {
+  if (featBackfill.running || !state.expr) return;
+  const msg = state.messages.find(m =>
+    !m.features && m.words.length && !featBackfill.tried.has(m.id)
+    && (isMine(m.author) || canEdit()) && (m.audioKey || isAudioMsg(m)));
+  if (!msg) return;
+  featBackfill.running = true;
+  featBackfill.tried.add(msg.id);
+  try {
+    const res = await fetch(`${location.origin}/media/${msg.audioKey || msg.file}`);
+    if (!res.ok || Number(res.headers.get('content-length')) > 30e6) throw new Error('skip');
+    const { features } = await analyzeBlob(await res.blob());
+    if (!features) throw new Error('no track');
+    await jfetch(`/api/chats/${state.chatId}/messages/${msg.id}/features`, {
+      method: 'PUT', headers: JSONH, body: JSON.stringify({ author: state.name, features }),
+    });
+    msg.features = features;
+    state.lastRenderKey = '';
+    render();
+  } catch { /* next one */ } finally {
+    featBackfill.running = false;
+    setTimeout(backfillFeatures, 1200);
   }
 }
 
@@ -3171,22 +3323,27 @@ function playbackAnalyser(el) {
 }
 
 const VIZ_BANDS = [[0, 2], [2, 4], [4, 7], [7, 12], [12, 20], [20, 40]]; // fft bins, speech-weighted
+const VIZ_BINS = 40;    // spectrum curve: bins 0..40 (~7.5kHz at 48k) — where a voice lives
+const VIZ_N = 6;        // ribbons
+// each ribbon follows the spectrum at its own speed: fast ones jump to the
+// sound, slow ones lag — they fan apart while you speak, and settle together
+// (into the same flat line) in silence
+const VIZ_SPEEDS = [0.55, 0.32, 0.2, 0.12, 0.07, 0.04];
 const viz = {
   el: null, ctx2d: null, raf: 0, mode: 'mic',
   bands: new Float32Array(VIZ_BANDS.length), smooth: new Float32Array(VIZ_BANDS.length),
-  freq: new Uint8Array(128), syn: 0, t0: performance.now(),
+  freq: new Uint8Array(128),
+  spec: new Float32Array(VIZ_BINS + 1),                           // the live spectrum, 0..1
+  ribbons: Array.from({ length: VIZ_N }, () => new Float32Array(VIZ_BINS + 1)),
+  syn: 0, t0: performance.now(),
   hue: null, // tonal hue from the spectrum — null until a real spectrum has been read
   sat: 0,    // how colored the picture is: 0 = white (silence) … 1 = the voice's hue
-  phase: 0,  // the ribbons' clock — it only ticks while there's sound
-  last: 0,
+  // the speaker's own range: running mean + spread of the log-centroid. Color
+  // is where the voice sits inside ITS range, not on an absolute scale — a
+  // high voice and a low voice both use the whole wheel, and clip at the ends
+  cMean: null, cDev: 0.35, cN: 0,
 };
 
-// color follows the voice: the spectral centroid (where the sound's energy
-// sits, in Hz) maps to hue — a deep voice glows red/orange, a bright one
-// runs through green toward blue/violet. Smoothed so it glides; silence
-// holds the last color instead of snapping to noise.
-// speech centroids (harmonics included) run ~500Hz for a deep voice to ~2kHz for a bright one
-const CENTROID_LO = Math.log(350), CENTROID_HI = Math.log(2800);
 function readBands(an, out) {
   an.getByteFrequencyData(viz.freq);
   VIZ_BANDS.forEach(([a, b], i) => {
@@ -3194,6 +3351,11 @@ function readBands(an, out) {
     for (let k = a; k < b; k++) sum += viz.freq[k];
     out[i] = Math.min(1, (sum / (b - a) / 255) * 1.4);
   });
+  // 3-tap smoothing across bins: a low voice's harmonic comb reads as shape, not jitter
+  for (let k = 0; k <= VIZ_BINS; k++) {
+    viz.spec[k] = (viz.freq[Math.max(k - 1, 0)] * 0.25 + viz.freq[k] * 0.5 + viz.freq[k + 1] * 0.25) / 255;
+  }
+  // spectral centroid (power-weighted) → the voice's tonal color
   const binHz = an.context.sampleRate / an.fftSize;
   let wsum = 0, msum = 0;
   for (let k = 1; k < 64; k++) { // up to ~12kHz — voice lives well inside this
@@ -3202,11 +3364,22 @@ function readBands(an, out) {
     msum += m;
   }
   if (msum < 255 * 255) return; // too quiet to judge — hold the color
-  const f = Math.min(Math.max(Math.log(wsum / msum), CENTROID_LO), CENTROID_HI);
-  const target = ((f - CENTROID_LO) / (CENTROID_HI - CENTROID_LO)) * 270; // red → violet
+  const f = Math.log(wsum / msum);
+  // learn this speaker's range: quick at first, then a slow drift (~20s of speech)
+  if (viz.cMean == null) { viz.cMean = f; viz.cN = 1; }
+  else {
+    const a = Math.max(0.004, 1 / (++viz.cN));
+    viz.cMean += (f - viz.cMean) * a;
+    viz.cDev += (Math.abs(f - viz.cMean) - viz.cDev) * a;
+  }
+  const z = Math.min(Math.max((f - viz.cMean) / Math.max(viz.cDev * 2.2, 0.15), -1), 1); // clips past ±range
+  const target = (z + 1) * 135; // red (low for them) → violet (high for them)
   // glide while speaking; out of silence, take the new voice's color outright
   viz.hue = viz.hue == null || viz.sat < 0.05 ? target : viz.hue + (target - viz.hue) * 0.06;
 }
+
+// a new speaker gets a fresh range (playback hands off between people)
+function vizResetSpeaker() { viz.cMean = null; viz.cDev = 0.35; viz.cN = 0; }
 
 // no analyser on the playing clip: pulse with the words being spoken
 function syntheticBands(out, t) {
@@ -3227,10 +3400,15 @@ function syntheticBands(out, t) {
     const wob = 0.65 + 0.35 * Math.sin(t * (2.1 + i * 0.9) + i * 1.7) * Math.sin(t * 5.3 + i);
     out[i] = viz.syn * wob * (i < 3 ? 1 : 0.6);
   }
+  // a plausible voice-shaped spectrum, scaled by the pulse
+  for (let k = 0; k <= VIZ_BINS; k++) {
+    viz.spec[k] = viz.syn * Math.exp(-k / 9) * (0.7 + 0.3 * Math.sin(t * 7 + k * 1.3));
+  }
 }
 
 function showViz(on, mode = viz.mode) {
   if (!viz.el) { viz.el = $('#viz'); viz.ctx2d = viz.el.getContext('2d'); }
+  if (mode !== viz.mode) vizResetSpeaker();
   viz.mode = mode;
   viz.el.classList.toggle('hidden', !on);
   if (on && !viz.raf) viz.raf = requestAnimationFrame(vizFrame);
@@ -3249,24 +3427,25 @@ function vizFrame(now) {
   const an = viz.mode === 'play' ? playbackAnalyser(activeEl()) : micAnalyser;
   if (an) readBands(an, viz.bands);
   else if (viz.mode === 'play') { viz.hue = null; syntheticBands(viz.bands, t); }
-  else viz.bands.fill(0);
+  else { viz.bands.fill(0); viz.spec.fill(0); }
   for (let i = 0; i < viz.bands.length; i++) {
     const d = viz.bands[i] - viz.smooth[i];
     viz.smooth[i] += d * (d > 0 ? 0.45 : 0.1); // quick to rise, slow to settle
   }
-  // nothing moves without sound: the clock advances with the energy, and the
-  // color bleeds in with it — silence is still, flat and white
-  const dt = viz.last ? Math.min((now - viz.last) / 1000, 0.1) : 0;
-  viz.last = now;
+  // nothing moves without sound: each ribbon is the spectrum followed at its
+  // own speed, and the color bleeds in with the energy — silence is still,
+  // flat and white
+  for (let r = 0; r < VIZ_N; r++) {
+    const rb = viz.ribbons[r], a = VIZ_SPEEDS[r];
+    for (let k = 0; k <= VIZ_BINS; k++) rb[k] += (viz.spec[k] - rb[k]) * a;
+  }
   const energy = (viz.smooth[0] + viz.smooth[1] + viz.smooth[2] + viz.smooth[3]) / 4;
-  viz.phase += dt * Math.max(0, energy - 0.04) * 3.5;
   const satTarget = Math.min(1, Math.max(0, energy - 0.04) * 4);
   viz.sat += (satTarget - viz.sat) * (satTarget > viz.sat ? 0.25 : 0.06);
-  drawViz(viz.ctx2d, W, H, viz.phase, viz.smooth);
+  drawViz(viz.ctx2d, W, H, energy);
 }
 
-function drawViz(c, W, H, t, b) {
-  const energy = (b[0] + b[1] + b[2] + b[3]) / 4;
+function drawViz(c, W, H, energy) {
   c.globalCompositeOperation = 'source-over';
   const bg = c.createLinearGradient(0, 0, 0, H);
   bg.addColorStop(0, '#0b0d18');
@@ -3275,50 +3454,48 @@ function drawViz(c, W, H, t, b) {
   c.fillRect(0, 0, W, H);
   c.globalCompositeOperation = 'lighter'; // ribbons add up into glow where they cross
 
-  // one hue at a time — the voice's tonal color when a spectrum is being
-  // read, else a slow drift around the wheel; the ribbons are its gradient,
-  // lowest frequency band darkest through highest lightest, so the picture
-  // reads as a single color breathing
-  const hue = viz.hue ?? (t * 3) % 360;
+  // one hue at a time — the voice's tonal color (relative to its own range);
+  // the ribbons are its gradient, slowest/darkest through fastest/lightest,
+  // so the picture reads as a single color breathing
+  const hue = viz.hue ?? 0;
   const sat = Math.round(90 * viz.sat); // white at rest, the voice's color when it speaks
-  const N = 6, step = Math.max(3, Math.round(W / 160));
   const scale = W / 800 + 0.6;
-  for (let r = 0; r < N; r++) {
-    const level = b[r % b.length];
-    const shade = r / (N - 1);          // 0 = bass (dark) … 1 = treble (light)
-    // body lightness: dark→light by band while colored; paler overall at rest
+  const mid = H / 2, span = H * 0.42;
+  // smooth the spectrum curve across x: low frequencies left, high right
+  const xs = [];
+  for (let k = 0; k <= VIZ_BINS; k++) xs.push((k / VIZ_BINS) * W);
+  for (let r = VIZ_N - 1; r >= 0; r--) { // slow (dark) first, fast (light) on top
+    const rb = viz.ribbons[r];
+    const shade = 1 - r / (VIZ_N - 1);  // 0 = slowest (dark) … 1 = fastest (light)
     const light = (30 + 48 * shade) * viz.sat + (58 + 30 * shade) * (1 - viz.sat);
-    const flip = r % 2 ? -1 : 1;        // alternate ribbons crest from above and below
-    const amp = H * (0.006 + 0.3 * level); // near-flat lines until there's sound
-    const yc = H * (0.5 + 0.1 * Math.sin(t * 0.35 + r * 1.3));
-    const crest = [];
-    for (let x = 0; x <= W + step; x += step) {
-      const u = x / W;
-      crest.push(yc + flip * (
-        Math.sin(u * (2.5 + r * 0.8) * Math.PI + t * (0.8 + r * 0.22)) * amp
-        + Math.sin(u * (6 + r * 1.6) * Math.PI - t * (1.6 + r * 0.3)) * amp * 0.35
-        + Math.sin(u * 1.3 * Math.PI + t * 0.45 + r) * H * 0.04
-      ));
+    const flip = r % 2 ? -1 : 1;        // alternate ribbons rise from above and below the midline
+    // catmull-rom through the bins: one smooth line, no per-bin spikes
+    const pts = [];
+    for (let k = 0; k <= VIZ_BINS; k++) pts.push(mid - flip * rb[k] * span);
+    c.beginPath();
+    c.moveTo(xs[0], pts[0]);
+    for (let k = 0; k < VIZ_BINS; k++) {
+      const p0 = pts[Math.max(k - 1, 0)], p1 = pts[k], p2 = pts[k + 1], p3 = pts[Math.min(k + 2, VIZ_BINS)];
+      const x1 = xs[k], x2 = xs[k + 1], dx = (x2 - x1) / 3;
+      c.bezierCurveTo(x1 + dx, p1 + (p2 - p0) / 6, x2 - dx, p2 - (p3 - p1) / 6, x2, p2);
     }
-    // body: fades from the crest toward the edge it grows from
-    const edge = flip > 0 ? H : 0;
-    c.beginPath();
-    c.moveTo(0, edge);
-    crest.forEach((y, i) => c.lineTo(i * step, y));
-    c.lineTo((crest.length - 1) * step, edge);
+    // body: a faint wash between the line and the midline
+    c.lineTo(xs[VIZ_BINS], mid);
+    c.lineTo(xs[0], mid);
     c.closePath();
-    const fg = c.createLinearGradient(0, yc - flip * amp, 0, edge);
-    fg.addColorStop(0, `hsla(${hue}, ${sat}%, ${light}%, ${0.06 + 0.1 * level})`);
-    fg.addColorStop(1, `hsla(${hue}, ${sat}%, ${light - 20}%, 0)`);
-    c.fillStyle = fg;
+    c.fillStyle = `hsla(${hue}, ${sat}%, ${light}%, ${0.03 + 0.07 * energy})`;
     c.fill();
-    // crest: a thin neon line — the glow is a real blur, not a wider stroke,
-    // and the width never changes with volume (brightness does)
+    // the line itself: thin, with a real neon blur — width never changes with volume
     c.beginPath();
-    crest.forEach((y, i) => (i ? c.lineTo(i * step, y) : c.moveTo(0, y)));
-    c.shadowColor = `hsla(${hue}, ${sat}%, ${light + 10}%, ${0.5 + 0.5 * level})`;
+    c.moveTo(xs[0], pts[0]);
+    for (let k = 0; k < VIZ_BINS; k++) {
+      const p0 = pts[Math.max(k - 1, 0)], p1 = pts[k], p2 = pts[k + 1], p3 = pts[Math.min(k + 2, VIZ_BINS)];
+      const x1 = xs[k], x2 = xs[k + 1], dx = (x2 - x1) / 3;
+      c.bezierCurveTo(x1 + dx, p1 + (p2 - p0) / 6, x2 - dx, p2 - (p3 - p1) / 6, x2, p2);
+    }
+    c.shadowColor = `hsla(${hue}, ${sat}%, ${light + 10}%, ${0.5 + 0.5 * energy})`;
     c.shadowBlur = 14 * scale;
-    c.strokeStyle = `hsla(${hue}, ${sat}%, ${light + 22}%, ${0.45 + 0.55 * level})`;
+    c.strokeStyle = `hsla(${hue}, ${sat}%, ${light + 22}%, ${0.45 + 0.55 * energy})`;
     c.lineWidth = 1.3 * scale;
     c.stroke();
     c.shadowBlur = 0;
@@ -3535,6 +3712,7 @@ function startAnchorDrag(e, msg) {
 // ---------- rendering ----------
 function render() {
   if (state.dragging) return; // don't rebuild the DOM out from under a drag
+  setTimeout(backfillFeatures, 800); // older messages grow their track in the background
   const pending = uploader.jobs.filter(j => !j.done);
   const key = JSON.stringify(state.messages.map(m => [m.id, m.transcriptStatus, m.words.length, m.anchorMs]))
     + '|' + pending.map(j => j.jid).join(',');
@@ -3627,6 +3805,7 @@ function renderMessage(msg, depth, unlocked = false) {
     ${msg.words.length || msg.text ? '<button class="copy-btn" title="Copy this message’s transcript">⧉</button>' : ''}
     ${(mine || canEdit()) && msg.transcriptStatus !== 'pending' ? '<button class="retr-btn" title="Transcribe again (uses your language setting)">↻</button>' : ''}
     ${mine || canEdit() ? '<button class="del-btn" title="Delete this message">✕</button>' : ''}`;
+  const expr = state.expr && msg.words.length ? exprFor(msg) : null;
   const authorEl = head.querySelector('.author');
   authorEl.textContent = msg.author;
   authorEl.style.color = colorFor(msg.author);
@@ -3670,6 +3849,30 @@ function renderMessage(msg, depth, unlocked = false) {
     await poll();
   };
   card.appendChild(head);
+
+  // heat strip: the message's timeline painted word by word with its
+  // expressiveness color (pauses dark); tap anywhere to play from there
+  if (expr && state.expr === 'strip') {
+    const dur = msgDur(msg);
+    const stops = [];
+    let prev = 0;
+    msg.words.forEach((w, i) => {
+      const a = (w.s / dur) * 100, b = (Math.max(w.e, w.s + 0.05) / dur) * 100;
+      if (a > prev + 0.01) stops.push(`transparent ${prev}% ${a}%`);
+      stops.push(`${exprColor(expr[i])} ${a}% ${b}%`);
+      prev = b;
+    });
+    if (prev < 100) stops.push(`transparent ${prev}% 100%`);
+    const strip = document.createElement('div');
+    strip.className = 'heat';
+    strip.title = 'Energy · tension · flow — hue, saturation, brightness';
+    strip.style.backgroundImage = `linear-gradient(90deg, ${stops.join(', ')})`;
+    strip.onclick = e => {
+      const r = strip.getBoundingClientRect();
+      tapTranscript(msg.id, ((e.clientX - r.left) / Math.max(r.width, 1)) * dur);
+    };
+    card.appendChild(strip);
+  }
 
   const body = document.createElement('div');
   body.className = 'msg-body';
@@ -3722,6 +3925,7 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.t = w.s;
       span.dataset.e = w.e;
       span.textContent = w.w;
+      if (expr && state.expr === 'text') span.style.setProperty('--wc', exprColor(expr[wi]));
       span.onclick = () => tapTranscript(msg.id, w.s + 0.001);
       frag.appendChild(span);
       frag.appendChild(document.createTextNode(' '));

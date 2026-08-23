@@ -191,9 +191,26 @@ const rowToMessage = r => ({
   gain: r.gain ?? 1,
   picture: r.picture || null,
   screenKey: r.screen_key || null,
+  audioKey: r.audio_key || null,
   layer: r.layer_user_id || null,
   userId: r.user_id || null,
+  features: r.features ? JSON.parse(r.features) : null,
 });
+
+// the expressiveness track: a small, fixed-shape JSON blob the client computes
+// from the audio — loudness (dBFS, ints) and pitch (Hz, 0 = unvoiced) at `hz`
+// samples a second. Validated to shape and size; never trusted for anything else.
+function cleanFeatures(raw) {
+  if (typeof raw !== 'string' || !raw || raw.length > 96 * 1024) return null;
+  try {
+    const f = JSON.parse(raw);
+    const ok = arr => Array.isArray(arr) && arr.length <= 20000 && arr.every(v => Number.isFinite(v));
+    if (!f || !(f.hz >= 1 && f.hz <= 10) || !ok(f.loud) || !ok(f.pitch) || f.loud.length !== f.pitch.length) return null;
+    return JSON.stringify({ hz: f.hz, loud: f.loud.map(v => Math.round(v)), pitch: f.pitch.map(v => Math.round(v)) });
+  } catch {
+    return null;
+  }
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -628,13 +645,13 @@ export default {
             .bind(newId, user.id, user.id, Date.now()),
           ...results.map(r => env.DB.prepare(
             `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms,
-               screen_key, audio_key, layer_user_id, duration_ms, gain, created_at, text, words, transcript_status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`
+               screen_key, audio_key, layer_user_id, duration_ms, gain, created_at, text, words, transcript_status, features)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(
             idMap.get(r.id), newId, r.user_id, r.author, r.video_key, r.mime,
             r.parent_id ? (idMap.get(r.parent_id) ?? null) : null, r.anchor_ms,
             r.screen_key, r.audio_key, r.duration_ms, r.gain, r.created_at,
-            r.text, r.words, r.transcript_status
+            r.text, r.words, r.transcript_status, r.features ?? null
           )),
         ];
         for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
@@ -880,6 +897,27 @@ export default {
         await env.DB.prepare("UPDATE messages SET transcript_status = 'pending' WHERE id = ?").bind(m[2]).run();
         const buf = await obj.arrayBuffer();
         ctx.waitUntil(transcribe(env, m[2], buf, cleanLang(body.language)));
+        return json({ ok: true });
+      }
+
+      // backfill the expressiveness track for an older message (the client
+      // decodes the stored audio and computes it) — author or editor
+      if ((m = pathname.match(/^\/api\/chats\/([A-Za-z0-9_-]+)\/messages\/([A-Za-z0-9_-]+)\/features$/)) && request.method === 'PUT') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        if (!chat) return json({ error: 'not found' }, 404);
+        const row = await env.DB.prepare('SELECT author, user_id FROM messages WHERE id = ? AND chat_id = ?')
+          .bind(m[2], m[1]).first();
+        if (!row) return json({ error: 'not found' }, 404);
+        const body = await request.json();
+        const user = await getUser(request, env);
+        const access = await chatAccess(env, user, chat);
+        const allowed = authEnabled(env)
+          ? access.role === 'editor' || (!!access.role && ownsMessage(user, row, body.author))
+          : ownsMessage(user, row, body.author);
+        if (!allowed) return json({ error: 'only the author or an editor can do this' }, 403);
+        const features = cleanFeatures(JSON.stringify(body.features ?? null));
+        if (!features) return json({ error: 'bad features' }, 400);
+        await env.DB.prepare('UPDATE messages SET features = ? WHERE id = ?').bind(features, m[2]).run();
         return json({ ok: true });
       }
 
@@ -1164,10 +1202,12 @@ async function createMessage(request, env, ctx, chatId) {
     if (obj && obj.size <= 24 * 1024 * 1024) transcriptBuf = await obj.arrayBuffer();
   }
 
+  const features = cleanFeatures(form.get('features'));
   await env.DB.prepare(
-    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, audio_key, layer_user_id, duration_ms, gain, created_at, transcript_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`
-  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, audioKey, msg.layer, msg.durationMs, msg.gain, msg.createdAt).run();
+    `INSERT INTO messages (id, chat_id, user_id, author, video_key, mime, parent_id, anchor_ms, screen_key, audio_key, layer_user_id, duration_ms, gain, created_at, transcript_status, features)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`
+  ).bind(msg.id, msg.chatId, msg.userId, msg.author, msg.file, msg.mime, msg.parentId, msg.anchorMs, msg.screenKey, audioKey, msg.layer, msg.durationMs, msg.gain, msg.createdAt, features).run();
+  if (features) msg.features = JSON.parse(features);
 
   // transcribe after the response goes out; client polls for the result.
   // Push notifications wait for the transcript so they can quote the message.
