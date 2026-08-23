@@ -668,7 +668,11 @@ body.role-viewer #screen-btn, body.role-viewer #cam-btn { display: none; }
 #menu-tuning input[type=range] { accent-color: var(--accent); }
 #menu-expr { display: flex; flex-direction: column; gap: 6px; }
 #menu-expr .menu-head { font-size: 12px; color: var(--muted); }
-#menu-expr .menu-check { padding: 2px 0; font-size: 13px; }
+/* beats the column layout the tuning sliders use for their labels */
+#menu-tuning #menu-expr .menu-check {
+  flex-direction: row; align-items: center; justify-content: flex-start; gap: 10px;
+  padding: 2px 0; font-size: 13px; color: var(--text); text-align: left;
+}
 #menu-tuning b { color: var(--text); font-variant-numeric: tabular-nums; }
 #menu-devices select, #menu-tuning select {
   background: var(--bg); color: var(--text); border: 1px solid #2e3342;
