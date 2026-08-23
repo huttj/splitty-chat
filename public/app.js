@@ -3092,6 +3092,16 @@ const exprLCH = (x, text = false) => text
   ? [0.64 + 0.3 * x.energy, 0.05 + 0.17 * x.flow, 264 + 121 * x.tension]
   : [0.52 + 0.38 * x.energy, 0.03 + 0.17 * x.flow, 264 + 121 * x.tension];
 const exprColor = (x, text = false) => oklch(...exprLCH(x, text));
+// a word's gradient: halfway-to-the-previous word at its left edge, its own
+// color in the middle, halfway-to-the-next at its right — so color flows
+// through the line instead of stepping word to word
+const mixLCH = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+function exprGradient(expr, i, text = false) {
+  const cur = exprLCH(expr[i], text);
+  const prev = i > 0 ? exprLCH(expr[i - 1], text) : cur;
+  const next = i + 1 < expr.length ? exprLCH(expr[i + 1], text) : cur;
+  return `linear-gradient(90deg, ${oklch(...mixLCH(prev, cur, 0.5))}, ${oklch(...cur)} 50%, ${oklch(...mixLCH(cur, next, 0.5))})`;
+}
 
 // Older messages have no track: the author (or an editor) quietly computes
 // one from the stored voice audio and saves it — one at a time, only while
@@ -4213,15 +4223,19 @@ function renderMessage(msg, depth, unlocked = false) {
   // or tap along it to play from there
   if (expr && exprOn('strip')) {
     const dur = msgDur(msg);
+    // continuous: a stop at each word's center, blending in between; only a
+    // paragraph-length pause opens a gap
     const stops = [];
-    let prev = 0;
     msg.words.forEach((w, i) => {
-      const a = (w.s / dur) * 100, b = (Math.max(w.e, w.s + 0.05) / dur) * 100;
-      if (a > prev + 0.01) stops.push(`transparent ${prev}% ${a}%`);
-      stops.push(`${exprColor(expr[i])} ${a}% ${b}%`);
-      prev = b;
+      const c = (((w.s + w.e) / 2) / dur) * 100;
+      if (i === 0 && w.s > 0.4) stops.push(`transparent 0%`, `transparent ${(w.s / dur) * 100}%`);
+      if (i > 0 && w.s - msg.words[i - 1].e >= state.parPause) {
+        stops.push(`transparent ${(msg.words[i - 1].e / dur) * 100}%`, `transparent ${(w.s / dur) * 100}%`);
+      }
+      stops.push(`${exprColor(expr[i])} ${c.toFixed(2)}%`);
     });
-    if (prev < 100) stops.push(`transparent ${prev}% 100%`);
+    const last = msg.words[msg.words.length - 1];
+    if (dur - last.e > 0.4) stops.push(`transparent ${(last.e / dur) * 100}%`, 'transparent 100%');
     const strip = document.createElement('div');
     strip.className = 'heat';
     strip.title = 'Brightness: energy · hue: tension · saturation: flow';
@@ -4303,8 +4317,14 @@ function renderMessage(msg, depth, unlocked = false) {
       span.dataset.t = w.s;
       span.dataset.e = w.e;
       span.textContent = w.w;
-      if (expr && exprOn('text')) span.style.setProperty('--wc', exprColor(expr[wi], true));
-      if (expr && exprOn('highlight')) span.style.setProperty('--hc', exprColor(expr[wi]));
+      if (expr && exprOn('text')) {
+        span.classList.add('grad');
+        span.style.setProperty('--wg', exprGradient(expr, wi, true));
+      }
+      if (expr && exprOn('highlight')) {
+        span.style.setProperty('--hc', exprColor(expr[wi]));      // solid: the glow
+        span.style.setProperty('--hg', exprGradient(expr, wi));   // gradient: the wash
+      }
       span.onclick = () => tapTranscript(msg.id, w.s + 0.001);
       frag.appendChild(span);
       frag.appendChild(document.createTextNode(' '));

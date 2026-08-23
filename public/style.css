@@ -276,6 +276,20 @@ body.dragging-anchor .word { cursor: grabbing; }
 
 .msg-body { font-size: 16px; }
 .word { cursor: pointer; border-radius: 3px; padding: 0 1px; color: var(--wc, inherit); } /* --wc: expressiveness tint */
+/* gradient-colored words: the gradient is painted through the glyphs; an
+   unseen word keeps its wash as a second layer under the text */
+.word.grad {
+  background-image: var(--wg); -webkit-background-clip: text; background-clip: text;
+  color: transparent; -webkit-text-fill-color: transparent;
+}
+.word.grad.unseen {
+  background-image: var(--wg), linear-gradient(rgba(255, 209, 102, 0.16), rgba(255, 209, 102, 0.16));
+  -webkit-background-clip: text, padding-box; background-clip: text, padding-box;
+}
+/* the playhead takes over: normal text on the highlight wash */
+.word.grad.speaking, .word.grad.scrub-focus {
+  -webkit-background-clip: border-box; background-clip: border-box; -webkit-text-fill-color: currentColor;
+}
 .word:hover { background: var(--accent-soft); }
 /* silences between words, width scaled to the pause length; tap to play from the pause */
 .gap {
@@ -324,7 +338,7 @@ body.expr-highlight .word.speaking, body.expr-highlight .word.scrub-focus { colo
       transparent calc(var(--f, 50%) - 28%),
       rgba(255, 255, 255, 0.5) var(--f, 50%),
       transparent calc(var(--f, 50%) + 28%)),
-    var(--hl);
+    var(--hg, var(--hl)); /* the wash: gradient per word when colored, else the solid */
   box-shadow: 0 0 14px var(--hl);
 }
 
