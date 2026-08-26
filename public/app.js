@@ -119,6 +119,37 @@ const players = [$('#player-a'), $('#player-b')];
 const preview = $('#preview');
 const activeEl = () => players[state.activeIdx];
 const standbyEl = () => players[state.activeIdx ^ 1];
+
+// Some files arrive with a media timeline that doesn't start at zero — stream
+// captures, recordings trimmed without re-encoding, TS-derived files. The
+// transcript, playlist, and scrubber all speak 0-based content time, so a
+// nonzero start desyncs everything at once: currentTime races past the last
+// word (highlighter parks, scrubber pegs at the end) and every seek to a small
+// content time clamps back up to the file's real start — taps "always replay
+// from the beginning". The offset is invisible in metadata (Chrome reports
+// seekable/buffered as [0, duration]); the one reliable tell is a seek that
+// lands far LATER than asked. So: all reads/writes of playback position go
+// through contentTime()/seekContent(), and a 'seeked' probe learns the offset
+// from the first clamped seek, then re-issues it corrected.
+const timeOffset = el => el._t0 || 0;
+const contentTime = el => el.currentTime - timeOffset(el);
+function seekContent(el, t) {
+  el._seekWant = t;
+  el.currentTime = t + timeOffset(el);
+}
+function watchTimelineOffset(el) {
+  el.addEventListener('loadstart', () => { el._t0 = 0; el._seekWant = null; });
+  el.addEventListener('seeked', () => {
+    const want = el._seekWant;
+    if (want == null) return;
+    el._seekWant = null;
+    const landed = el.currentTime;
+    if (landed > want + timeOffset(el) + 1.5) {
+      el._t0 = landed; // clamped up to the timeline's true start — that IS the offset
+      if (want > 0.05) seekContent(el, want);
+    }
+  });
+}
 const isAudioMsg = msg => !!msg && (msg.mime || '').startsWith('audio/');
 const mediaUrl = msg => {
   const b = blobStore.get(msg.file);
@@ -537,7 +568,7 @@ function initMenu() {
     state._uploadAnchor = state.playing && state.playIdx >= 0
       ? {
           parentId: state.playlist[state.playIdx].id,
-          anchorMs: Math.floor(activeEl().currentTime * 1000),
+          anchorMs: Math.floor(contentTime(activeEl()) * 1000),
         }
       : null;
     $('#upload-input').click();
@@ -958,7 +989,7 @@ function initChat() {
     if (!f) return showToast('Drop a video or audio file');
     if (!canRecordHere()) return showToast("You don't have permission to post here");
     state._uploadAnchor = state.playing && state.playIdx >= 0
-      ? { parentId: state.playlist[state.playIdx].id, anchorMs: Math.floor(activeEl().currentTime * 1000) }
+      ? { parentId: state.playlist[state.playIdx].id, anchorMs: Math.floor(contentTime(activeEl()) * 1000) }
       : null;
     uploadVideoFile(f);
   });
@@ -1139,9 +1170,10 @@ function initChat() {
 
   // the recorded screen track: pending-seek plumbing like the players
   const sp = screenEl();
+  watchTimelineOffset(sp);
   sp.addEventListener('loadedmetadata', () => {
     if (sp._pendingSeek != null && !sp.srcObject) {
-      sp.currentTime = sp._pendingSeek;
+      seekContent(sp, sp._pendingSeek);
       sp._pendingSeek = null;
     }
     sp.playbackRate = state.speed;
@@ -1233,10 +1265,11 @@ function initChat() {
     for (const ev of ['playing', 'canplay', 'seeked']) {
       el.addEventListener(ev, () => { el._waiting = false; updateVidSpinner(); });
     }
+    watchTimelineOffset(el);
     el.addEventListener('loadedmetadata', e => {
       const v = e.target;
       if (v._pendingSeek != null) {
-        v.currentTime = v._pendingSeek;
+        seekContent(v, v._pendingSeek);
         v._pendingSeek = null;
       }
       v.playbackRate = state.speed;
@@ -1821,9 +1854,9 @@ function playSegment(idx, offset, autoplay = true) {
       el._launched = false;
       // resync only on real drift (rAF jank, blown estimates) — small overshoot
       // plays through; a routine back-seek here reads as a stutter
-      if (Math.abs(el.currentTime - seg.start) > 0.4) el.currentTime = seg.start;
+      if (Math.abs(contentTime(el) - seg.start) > 0.4) seekContent(el, seg.start);
     } else {
-      el.currentTime = seg.start; // parked early for overlap — snap to the real start
+      seekContent(el, seg.start); // parked early for overlap — snap to the real start
     }
     el.muted = false;
     if (autoplay) { if (el.paused) safePlay(el); }
@@ -1834,7 +1867,7 @@ function playSegment(idx, offset, autoplay = true) {
     el._launched = false;
     el.muted = false;
     if (el.src === src) {
-      el.currentTime = at;
+      seekContent(el, at);
       autoplay ? safePlay(el) : el.pause();
     } else {
       el._pendingSeek = at;
@@ -1872,7 +1905,7 @@ function loadScreenFor(msg, at) {
     sp.preload = 'auto';
     sp.src = surl;
   } else if (sp.readyState >= 1) {
-    sp.currentTime = at;
+    seekContent(sp, at);
   } else {
     sp._pendingSeek = at;
   }
@@ -1905,8 +1938,8 @@ function tickScreenSync() {
     return;
   }
 
-  const dur = sp.duration || Infinity;
-  const pastScreenEnd = el.currentTime > dur - 0.3; // screen track can be shorter — that's fine
+  const dur = (sp.duration || Infinity) - timeOffset(sp);
+  const pastScreenEnd = contentTime(el) > dur - 0.3; // screen track can be shorter — that's fine
   const screenReady = sp.readyState >= 3 || pastScreenEnd;
 
   // we paused the camera to let the screen half buffer — release when ready.
@@ -1936,7 +1969,7 @@ function tickScreenSync() {
     if (!sp.paused) sp.pause();
   } else {
     if (sp.paused) sp.play().catch(() => {});
-    if (Math.abs(sp.currentTime - el.currentTime) > 0.35 && !sp.seeking) sp.currentTime = el.currentTime;
+    if (Math.abs(contentTime(sp) - contentTime(el)) > 0.35 && !sp.seeking) seekContent(sp, contentTime(el));
   }
   if (sp.playbackRate !== state.speed) sp.playbackRate = state.speed;
 }
@@ -1961,7 +1994,7 @@ function prepareNext(idx) {
   stb._launched = false;
   stb.pause();
   if (stb.src === nsrc && stb.readyState >= 1) {
-    stb.currentTime = parkAt;
+    seekContent(stb, parkAt);
   } else {
     stb._pendingSeek = parkAt;
     stb.preload = 'auto';
@@ -1997,7 +2030,7 @@ function scrollToHighlight() {
   const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
   const msg = seg && state.byId.get(seg.id);
   if (!msg || !msg.words.length) return;
-  const t = activeEl().currentTime;
+  const t = contentTime(activeEl());
   let i = msg.words.findIndex(w => t < w.e);
   if (i === -1) i = msg.words.length - 1;
   document.querySelector(`.word[data-mid="${seg.id}"][data-i="${i}"]`)
@@ -2028,7 +2061,7 @@ function togglePause() {
 function currentVT() {
   const seg = state.playlist[state.playIdx];
   if (!seg) return 0;
-  const within = Math.min(Math.max(activeEl().currentTime - seg.start, 0), seg.end - seg.start);
+  const within = Math.min(Math.max(contentTime(activeEl()) - seg.start, 0), seg.end - seg.start);
   return seg.vStart + within;
 }
 
@@ -2184,13 +2217,13 @@ function tickHighlight() {
       || el.src === mediaUrl(segMsg)
       || el.src === `${location.origin}/media/${segMsg.file}`;
     if (!srcOk) {
-      focusWordAt(seg, el.currentTime - state.wordLag, 'speaking');
+      focusWordAt(seg, contentTime(el) - state.wordLag, 'speaking');
       tickScreenSync(); // never starve the screen half over a url-form mismatch
       return;
     }
     // content-time on both sides: active and standby play at the same rate,
     // so speed cancels out — never scale these thresholds by playbackRate
-    const remain = seg.end - el.currentTime;
+    const remain = seg.end - contentTime(el);
     // frame-rate boundary enforcement: cut within ~16ms of the splice point.
     // File-end segments are exempt — the 'ended' event is the truth there,
     // since estimated duration can undershoot the real file.
@@ -2221,7 +2254,7 @@ function tickHighlight() {
   // means "trust the measurement", positive pushes the glow later, negative
   // earlier. Tuned per device, which is what localStorage gives us anyway.
   const outLag = audioCtx ? (audioCtx.outputLatency || audioCtx.baseLatency || 0) : 0;
-  focusWordAt(seg, el.currentTime - outLag * (el.playbackRate || 1) - state.wordLag, 'speaking');
+  focusWordAt(seg, contentTime(el) - outLag * (el.playbackRate || 1) - state.wordLag, 'speaking');
   tickScreenSync();
 }
 requestAnimationFrame(tickHighlight);
@@ -2253,7 +2286,7 @@ function previewVirtual(vt) {
     el._autoplay = false;
     el.src = src;
   } else {
-    el.currentTime = at;
+    seekContent(el, at);
   }
   // scrubbing through a screen share previews the screen frame too
   screenEl().pause();
@@ -2282,7 +2315,7 @@ function onTimeUpdate() {
   if (!state.playing || state.playIdx < 0) return;
   if (state.scrubbing) return; // paused preview seeks — don't advance or mark seen
   const seg = state.playlist[state.playIdx];
-  const t = activeEl().currentTime;
+  const t = contentTime(activeEl());
   const segMsg = state.byId.get(seg.id);
   if (segMsg && activeEl().src !== mediaUrl(segMsg)
     && activeEl().src !== `${location.origin}/media/${segMsg.file}`) return; // mismatched after a scrub — don't advance on the wrong clock
@@ -2315,7 +2348,7 @@ function remapPlayback() {
   if (!state.playing || state.playIdx < 0) return;
   const seg = state.playlist[state.playIdx];
   const msgId = seg?.id;
-  const t = activeEl().currentTime;
+  const t = contentTime(activeEl());
   buildPlaylist();
   if (!msgId) return;
   let idx = state.playlist.findIndex(s => s.id === msgId && t >= s.start - 0.001 && t < s.end);
@@ -2501,8 +2534,8 @@ async function toggleRecord() {
   if (state.playing && state.playIdx >= 0) {
     const seg = state.playlist[state.playIdx];
     parentId = seg.id;
-    anchorMs = Math.floor(activeEl().currentTime * 1000);
-    resume = { msgId: seg.id, atSec: activeEl().currentTime };
+    anchorMs = Math.floor(contentTime(activeEl()) * 1000);
+    resume = { msgId: seg.id, atSec: contentTime(activeEl()) };
     activeEl().pause();
   }
 
@@ -3417,7 +3450,11 @@ async function uploadVideoFile(file) {
   enqueueUpload(job);
   audioPromise.then(a => {
     if (!a) return;
-    job.durationMs ||= a.durationMs;
+    // container metadata overstates duration when the file's timeline starts
+    // past zero (stream captures, trim-without-reencode) — it reports offset +
+    // length. The decoded audio is the real content length; trust it when the
+    // two disagree by a lot.
+    if (!job.durationMs || job.durationMs > a.durationMs * 1.1 + 10_000) job.durationMs = a.durationMs;
     if (a.durationMs <= 240_000) {
       // short clip: one inline audio track, and the crash-recovery copy gets it
       job.audioBlob = wavBlob(a.mono, a.rate);
@@ -3880,13 +3917,13 @@ function vizFrame(now) {
       else if (cur) {
         // no WebAudio chain (compressor off): the stored track stands in, read at the playhead
         ensureFeatures(cur);
-        fed = storedBands(cur, el.currentTime, viz.bands);
+        fed = storedBands(cur, contentTime(el), viz.bands);
       }
     }
     // the color is the spoken word's expressiveness color, same as the highlighter
     const seg = state.playIdx >= 0 ? state.playlist[state.playIdx] : null;
     const cur = seg && state.byId.get(seg.id);
-    const target = cur && !el.paused ? wordLCHAt(cur, el.currentTime - state.wordLag) : (viz.snap && cur ? wordLCHAt(cur, viz.snap.t) : null);
+    const target = cur && !el.paused ? wordLCHAt(cur, contentTime(el) - state.wordLag) : (viz.snap && cur ? wordLCHAt(cur, viz.snap.t) : null);
     if (target) {
       if (!viz.lch || viz.sat < 0.05) viz.lch = target.slice();
       else for (let i = 0; i < 3; i++) viz.lch[i] += (target[i] - viz.lch[i]) * 0.25;
