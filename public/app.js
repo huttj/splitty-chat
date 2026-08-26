@@ -1049,18 +1049,28 @@ function initChat() {
         scrubToTime(mid, Math.max(msgDur(msg) - 0.02, 0));
       }
     };
-    const onUp = () => {
+    // pointercancel matters as much as pointerup here: on touch, the browser
+    // cancels the pointer stream the moment native scrolling wins the gesture.
+    // Without it the drag never ends — scrubbing sticks on (freezing the
+    // highlighter and the scrubber, leaving playback paused by the preview)
+    // and the stale once-armed pointerup fires on the NEXT tap, eating it and
+    // seeking to the abandoned scrub position.
+    const finish = ev => {
       document.removeEventListener('pointermove', onMove);
-      if (active) {
-        transcriptDragTs = performance.now();
-        state.scrubbing = false;
-        clearScrubFocus();
-        // land where the drag ended, restoring the play/pause state it began with
-        seekVirtual(Number($('#scrubber').value), state.scrubResume);
-      }
+      document.removeEventListener('pointerup', finish);
+      document.removeEventListener('pointercancel', finish);
+      if (!active) return;
+      // no click trails a canceled pointer, so only a real drag-end needs to
+      // suppress the one that trails it
+      if (ev.type !== 'pointercancel') transcriptDragTs = performance.now();
+      state.scrubbing = false;
+      clearScrubFocus();
+      // land where the drag ended, restoring the play/pause state it began with
+      seekVirtual(Number($('#scrubber').value), state.scrubResume);
     };
     document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp, { once: true });
+    document.addEventListener('pointerup', finish);
+    document.addEventListener('pointercancel', finish);
   });
 
   const noDragClick = fn => () => {
@@ -1091,14 +1101,18 @@ function initChat() {
       };
       applyControlsPos();
     };
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', () => {
+    const done = () => {
       document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', done);
+      document.removeEventListener('pointercancel', done);
       if (moved) {
         controlsDragTs = performance.now();
         localStorage.setItem('splitty:recpos', JSON.stringify(state.recPos));
       }
-    }, { once: true });
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', done);
+    document.addEventListener('pointercancel', done);
   });
   $('#self-btn').onclick = () => {
     state.selfHide = !state.selfHide;
@@ -1178,11 +1192,16 @@ function initChat() {
         apply(ev.clientX - rect.width / 2, ev.clientY - rect.height / 2, rect.width);
       }
     };
-    document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', () => {
+    const done = ev => {
       document.removeEventListener('pointermove', onMove);
-      if (!moved) conf.onTap();
-    }, { once: true });
+      document.removeEventListener('pointerup', done);
+      document.removeEventListener('pointercancel', done);
+      // a canceled pointer isn't a tap
+      if (!moved && ev.type !== 'pointercancel') conf.onTap();
+    };
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', done);
+    document.addEventListener('pointercancel', done);
   });
 
   for (const el of players) {
@@ -1267,11 +1286,14 @@ function initChat() {
     };
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
       localStorage.setItem('splitty:split', chatEl.style.getPropertyValue('--split'));
       localStorage.setItem('splitty:stageh', chatEl.style.getPropertyValue('--stageh'));
     };
     document.addEventListener('pointermove', onMove);
-    document.addEventListener('pointerup', onUp, { once: true });
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
   });
 
   // undo anchor moves with cmd/ctrl+Z; space toggles play/pause
@@ -4173,15 +4195,19 @@ function startAnchorDrag(e, msg) {
     const el = document.elementFromPoint(ev.clientX, ev.clientY);
     setTarget(el?.classList?.contains('word') && el.dataset.mid === msg.parentId ? el : null);
   };
-  const onUp = async () => {
+  // a canceled pointer must still tear the drag down — a stuck state.dragging
+  // stops render() from ever rebuilding the transcript again
+  const onUp = async ev => {
     document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', onUp);
+    document.removeEventListener('pointercancel', onUp);
     document.body.classList.remove('dragging-anchor');
     srcCard?.classList.remove('drag-src');
     ghost.classList.add('hidden');
     const target = state.dragging.target;
     target?.classList.remove('drop-target');
     state.dragging = null;
-    if (!target) return;
+    if (!target || ev.type === 'pointercancel') return; // cancel = never mind, don't move it
     const prev = msg.anchorMs;
     const anchorMs = Math.round(Number(target.dataset.t) * 1000);
     if (anchorMs === prev) return;
@@ -4191,7 +4217,8 @@ function startAnchorDrag(e, msg) {
     }
   };
   document.addEventListener('pointermove', onMove);
-  document.addEventListener('pointerup', onUp, { once: true });
+  document.addEventListener('pointerup', onUp);
+  document.addEventListener('pointercancel', onUp);
 }
 
 // ---------- rendering ----------
@@ -4379,11 +4406,13 @@ function renderMessage(msg, depth, unlocked = false) {
       const up = ev => {
         strip.removeEventListener('pointermove', move);
         strip.removeEventListener('pointerup', up);
+        strip.removeEventListener('pointercancel', up);
         clearScrubFocus();
-        tapTranscript(msg.id, at(ev));
+        if (ev.type !== 'pointercancel') tapTranscript(msg.id, at(ev));
       };
       strip.addEventListener('pointermove', move);
       strip.addEventListener('pointerup', up);
+      strip.addEventListener('pointercancel', up);
     });
     card.classList.add('has-heat');
     body.appendChild(strip);
