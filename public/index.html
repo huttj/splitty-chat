@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>splitty</title>
-  <link rel="stylesheet" href="/style.css?v=129">
+  <link rel="stylesheet" href="/style.css?v=133">
 </head>
 <body>
 
@@ -57,6 +57,7 @@
       </label>
       <button id="bell-btn" class="menu-row hidden" title="Notifications"></button>
       <button id="upload-btn" class="menu-row" title="Post an existing video or audio file as a message">Upload a video or audio file…</button>
+      <button id="tour-btn" class="menu-row" title="Replay the quick tour">How splitty works</button>
       <button id="copy-tx-btn" class="menu-row" title="Copy the whole conversation as text — attributed, timestamped, interleaved as it plays">Copy transcript</button>
       <input type="file" id="upload-input" accept="video/*,audio/*,.m4a,.mp3,.wav,.ogg,.opus,.flac,.aac" class="hidden">
       <button id="name-btn" class="menu-row" title="Change your display name"></button>
@@ -178,7 +179,7 @@
       </div>
     </div>
 
-    <div id="splitter"></div>
+    <div id="splitter" title="Drag to resize — double-click to auto-fit the video"></div>
 
     <main id="messages"></main>
 
@@ -307,6 +308,22 @@
     </div>
   </div>
 
+  <!-- first-visit tour: a spotlight on the thing to try, card beside it -->
+  <div id="tour-gate" class="hidden">
+    <div id="tour-spot"></div>
+    <div id="tour-card">
+      <button id="tour-skip" class="btn-ghost">Skip</button>
+      <div id="tour-icon"></div>
+      <h2 id="tour-title"></h2>
+      <p id="tour-text"></p>
+      <div id="tour-foot">
+        <button id="tour-back" class="btn-ghost">Back</button>
+        <div id="tour-dots"></div>
+        <button id="tour-next" class="btn-primary">Next</button>
+      </div>
+    </div>
+  </div>
+
   <!-- name gate / sign in -->
   <div id="name-gate" class="hidden">
     <div id="gate-card">
@@ -338,6 +355,6 @@
     </div>
   </div>
 
-  <script src="/app.js?v=131"></script>
+  <script src="/app.js?v=135"></script>
 </body>
 </html>

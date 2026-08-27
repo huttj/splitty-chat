@@ -549,6 +549,7 @@ function initMenu() {
     uploadVideoFile(f);
   };
 
+  $('#tour-btn').onclick = () => { $('#menu-pop').classList.add('hidden'); showTour(); };
   $('#copy-tx-btn').onclick = async () => {
     await navigator.clipboard.writeText(transcriptText());
     pop.classList.add('hidden');
@@ -894,6 +895,86 @@ async function loadAdmin(fromCache = false) {
     };
     list.appendChild(row);
   }
+}
+
+// ---------- first-visit tour ----------
+// five cards, each spotlighting the control it talks about; shown once per
+// device the first time you land somewhere you can record, replayable from
+// the menu
+const TAP = matchMedia('(pointer: coarse)').matches ? 'tap' : 'click';
+const Tap = TAP[0].toUpperCase() + TAP.slice(1);
+const TOUR = [
+  { target: '#rec-btn', icon: '<span class="rec-dot"></span>', title: 'Reply at any moment',
+    text: `${Tap} record any time — even mid-playback. Your video gets spliced in right there, like you interjected on the spot.` },
+  { target: '#messages', icon: '<svg class="ic" viewBox="0 0 16 16"><path d="M2 3h12v1.6H2zM2 7.2h8v1.6H2zM2 11.4h10V13H2z"/></svg>',
+    title: 'The transcript is the timeline',
+    text: `${Tap} any word to jump to that moment, ${TAP} it again to play, and drag left or right to scrub.` },
+  { target: '#screen-btn', icon: '<svg class="ic" viewBox="0 0 16 16"><path d="M1.5 2A1.5 1.5 0 0 0 0 3.5v7A1.5 1.5 0 0 0 1.5 12h4.9l-.37 1.5H4.5a.75.75 0 0 0 0 1.5h7a.75.75 0 0 0 0-1.5h-1.53L9.6 12h4.9a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 14.5 2h-13z"/></svg>',
+    title: 'Share your screen',
+    text: 'While it\'s on, your recordings include your screen alongside you.' },
+  { target: '#cam-btn', icon: '<svg class="ic" viewBox="0 0 16 16"><path d="M1.5 3A1.5 1.5 0 0 0 0 4.5v7A1.5 1.5 0 0 0 1.5 13h8a1.5 1.5 0 0 0 1.5-1.5V9.6l3.4 2.1a.7.7 0 0 0 1.1-.6V4.9a.7.7 0 0 0-1.1-.6L11 6.4V4.5A1.5 1.5 0 0 0 9.5 3h-8z"/></svg>',
+    title: 'Keep your camera on',
+    text: 'You can go voice-only here, but consider keeping video. Faces are far more engaging and say a lot that words don\'t.' },
+  { target: '#share-btn', icon: '<svg class="ic" viewBox="0 0 16 16"><path d="M11 1.5a2 2 0 1 1-1.6 3.2L5.9 6.7a2 2 0 0 1 0 2.6l3.5 2a2 2 0 1 1-.6 1.1l-3.8-2.2a2 2 0 1 1 0-4.4l3.8-2.2A2 2 0 0 1 11 1.5z"/></svg>',
+    title: 'Share the conversation',
+    text: 'Invite people one by one, or open it to the world and let anyone comment. Public replies stay in separate layers per person, so every thread stays focused.' },
+];
+let tourStep = -1;
+function showTour(step = 0) {
+  tourStep = step;
+  const gate = $('#tour-gate');
+  const done = () => { tourStep = -1; gate.classList.add('hidden'); localStorage.setItem('splitty:tour', '1'); };
+  const paint = () => {
+    const s = TOUR[tourStep];
+    $('#tour-icon').innerHTML = s.icon;
+    $('#tour-title').textContent = s.title;
+    $('#tour-text').textContent = s.text;
+    $('#tour-dots').innerHTML = TOUR.map((_, k) => `<i class="${k === tourStep ? 'on' : ''}"></i>`).join('');
+    $('#tour-next').textContent = tourStep === TOUR.length - 1 ? 'Got it' : 'Next';
+    $('#tour-back').classList.toggle('hidden', tourStep === 0);
+    placeTour();
+  };
+  $('#tour-next').onclick = () => { if (tourStep < TOUR.length - 1) { tourStep++; paint(); } else done(); };
+  $('#tour-back').onclick = () => { if (tourStep > 0) { tourStep--; paint(); } };
+  $('#tour-skip').onclick = done;
+  gate.onclick = e => { if (e.target === gate || e.target === $('#tour-spot')) done(); };
+  gate.classList.remove('hidden');
+  paint();
+}
+// spotlight the step's control and park the card beside it (below if there's
+// room, else above; a big target like the transcript gets the card inside it)
+function placeTour() {
+  if (tourStep < 0) return;
+  const spot = $('#tour-spot'), card = $('#tour-card');
+  const el = $(TOUR[tourStep].target);
+  const vw = window.innerWidth, vh = window.innerHeight, m = 12;
+  const visible = el && !el.classList.contains('hidden') && el.getClientRects().length;
+  let r = visible ? el.getBoundingClientRect() : null;
+  spot.classList.toggle('none', !r);
+  if (r) {
+    const pad = 6;
+    Object.assign(spot.style, { left: `${r.left - pad}px`, top: `${r.top - pad}px`, width: `${r.width + 2 * pad}px`, height: `${r.height + 2 * pad}px` });
+  } else Object.assign(spot.style, { left: '50%', top: '50%' });
+  const cw = card.offsetWidth, ch = card.offsetHeight;
+  let x, y;
+  if (!r) { x = (vw - cw) / 2; y = (vh - ch) / 2; }
+  else if (r.width > vw * 0.5 && r.height > vh * 0.4) { // the transcript: sit inside it
+    x = r.left + (r.width - cw) / 2; y = r.top + Math.min(r.height * 0.25, r.height - ch - m);
+  } else {
+    x = r.left + r.width / 2 - cw / 2;
+    y = r.bottom + m + ch <= vh ? r.bottom + m : r.top - m - ch;
+    if (y < m) y = (vh - ch) / 2; // no room either way (tiny screens): center
+  }
+  x = Math.min(Math.max(x, m), vw - cw - m);
+  y = Math.min(Math.max(y, m), vh - ch - m);
+  card.style.left = `${x}px`; card.style.top = `${y}px`;
+}
+window.addEventListener('resize', placeTour);
+// first time somewhere you can record (after the name gate, if it had to open)
+function maybeTour() {
+  if (localStorage.getItem('splitty:tour')) return;
+  if (!$('#name-gate').classList.contains('hidden')) return;
+  setTimeout(showTour, 400); // let the stage settle so the spotlight lands on the real layout
 }
 
 // ---------- chat ----------
@@ -1245,18 +1326,23 @@ function initChat() {
     speedBtn.textContent = `${state.speed}×`;
   };
 
-  // draggable divider: side-by-side on wide screens, video height on portrait
+  // draggable divider: side-by-side in landscape, video height in portrait.
+  // Two remembered sizes per axis: one for a single picture, one for the
+  // two-video split (which wants a very different pane shape)
   const chatEl = $('#chat');
-  const savedSplit = localStorage.getItem('splitty:split');
-  if (savedSplit) chatEl.style.setProperty('--split', savedSplit);
-  const savedStageH = localStorage.getItem('splitty:stageh');
-  if (savedStageH) chatEl.style.setProperty('--stageh', savedStageH);
+  if (!localStorage.getItem('splitty:panefit')) { // one-time: sizes dragged before auto-fit shouldn't pin the pane forever
+    localStorage.removeItem('splitty:split'); localStorage.removeItem('splitty:stageh');
+    localStorage.setItem('splitty:panefit', '1');
+  }
+  applyPane();
+  $('#splitter').addEventListener('dblclick', resetPane); // double-click the divider: back to auto-fit
   $('#splitter').addEventListener('pointerdown', e => {
     e.preventDefault();
-    const wide = window.matchMedia('(min-width: 880px)').matches;
+    const wide = isLandscape();
+    paneDragging = true; // applyPane must not undo the drag mid-gesture
     const onMove = ev => {
       if (wide) {
-        const px = Math.min(Math.max(ev.clientX, 280), window.innerWidth - 380);
+        const px = Math.min(Math.max(ev.clientX, minPaneW()), window.innerWidth - minChatW());
         chatEl.style.setProperty('--split', `${px}px`);
       } else {
         const top = $('#stage').getBoundingClientRect().top;
@@ -1267,8 +1353,10 @@ function initChat() {
     };
     const onUp = () => {
       document.removeEventListener('pointermove', onMove);
-      localStorage.setItem('splitty:split', chatEl.style.getPropertyValue('--split'));
-      localStorage.setItem('splitty:stageh', chatEl.style.getPropertyValue('--stageh'));
+      paneDragging = false;
+      const k = splitActive() ? '2' : '';
+      localStorage.setItem('splitty:split' + k, chatEl.style.getPropertyValue('--split'));
+      localStorage.setItem('splitty:stageh' + k, chatEl.style.getPropertyValue('--stageh'));
     };
     document.addEventListener('pointermove', onMove);
     document.addEventListener('pointerup', onUp, { once: true });
@@ -1320,7 +1408,7 @@ function initChat() {
   scrubber.addEventListener('pointercancel', endScrub);
 
   // floating videos track the box and their own intrinsic size
-  window.addEventListener('resize', relayoutPips);
+  window.addEventListener('resize', () => { applyPane(); relayoutPips(); });
   for (const el of [...players, screenEl(), preview]) {
     el.addEventListener('resize', relayoutPips);         // intrinsic size changed (e.g. shared window resized mid-clip)
     el.addEventListener('loadedmetadata', relayoutPips); // aspect known — snap the pip box to it
@@ -1356,6 +1444,7 @@ function initChat() {
     state.lastRenderKey = '';
     render();
     ensureCam().catch(armCamRetry);
+    maybeTour();
   };
   $('#name-gate').addEventListener('click', e => {
     if (e.target === $('#name-gate') && state.name && !gateAuthMode) $('#name-gate').classList.add('hidden');
@@ -1385,6 +1474,7 @@ function initChat() {
     // name-only mode: gate on a name, then warm the camera
     if (!state.name) openNameGate();
     else ensureCam().catch(armCamRetry);
+    maybeTour();
   }
   // with auth configured, wait for the first poll: viewers never get gated or
   // asked for a camera, and locked chats show the request-access screen instead
@@ -1489,6 +1579,7 @@ function setRole(role) {
     if (canRecordHere()) {
       if (canComment() && !state.name && !state.auth.user) state.openNameGate?.();
       else ensureCam().catch(armCamRetry);
+      maybeTour();
     }
     // back from the sign-in they started by tapping record: don't auto-record,
     // but light the path — pulsing button + a hint until they tap it
@@ -3593,6 +3684,7 @@ function pipHoverCursor(e) {
 
 function relayoutPips() {
   const box = $('#video-box');
+  applyPane();
   if (box.classList.contains('screen-split')) layoutSplit();
   if (box.classList.contains('mode-play') || box.classList.contains('mode-screenlive')) {
     layoutPip(preview, pips.cam);
@@ -3603,33 +3695,103 @@ function relayoutPips() {
 
 // Split layout, computed: both videos render at their true aspect ratios,
 // sandwiched flush against each other and centered — the pair scaled to fit.
-// Portrait boxes stack top/bottom (shared width, heights by aspect); landscape
-// goes side by side (shared height, widths by aspect). A taller screen share
-// naturally takes more room than the camera — no fixed 50/50.
+// Stacked (shared width, heights by aspect) or side by side (shared height,
+// widths by aspect) — whichever fills more of the box, not simply whichever
+// way the box leans. A taller screen share naturally takes more room than
+// the camera — no fixed 50/50.
+const videoAspect = el => (el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : 16 / 9);
+// how the pair best fits a W×H box: the arrangement and the area it covers
+function fitPair(W, H, a1, a2) {
+  const stackW = Math.min(W, H / (1 / a1 + 1 / a2)), stackArea = stackW * stackW * (1 / a1 + 1 / a2);
+  const sideH = Math.min(H, W / (a1 + a2)), sideArea = sideH * sideH * (a1 + a2);
+  return stackArea >= sideArea ? { stack: true, w: stackW, area: stackArea } : { stack: false, h: sideH, area: sideArea };
+}
 function layoutSplit() {
   const box = $('#video-box');
   const sp = screenEl(), cam = activeEl();
   const W = box.clientWidth, H = box.clientHeight;
   if (!W || !H) return;
-  const ar = el => (el.videoWidth && el.videoHeight ? el.videoWidth / el.videoHeight : 16 / 9);
-  const a1 = ar(sp), a2 = ar(cam);
+  const a1 = videoAspect(sp), a2 = videoAspect(cam);
+  const fit = fitPair(W, H, a1, a2);
   const setRect = (el, l, t, w, h) => Object.assign(el.style, {
     position: 'absolute', inset: 'auto',
     left: `${l}px`, top: `${t}px`, width: `${w}px`, height: `${h}px`,
   });
-  if (H > W) { // portrait: stack
-    const w = Math.min(W, H / (1 / a1 + 1 / a2));
-    const h1 = w / a1, h2 = w / a2;
+  if (fit.stack) {
+    const w = fit.w, h1 = w / a1, h2 = w / a2;
     const left = (W - w) / 2, top = (H - (h1 + h2)) / 2;
     setRect(sp, left, top, w, h1);
     setRect(cam, left, top + h1, w, h2);
-  } else { // landscape: side by side
-    const h = Math.min(H, W / (a1 + a2));
-    const w1 = h * a1, w2 = h * a2;
+  } else {
+    const h = fit.h, w1 = h * a1, w2 = h * a2;
     const left = (W - (w1 + w2)) / 2, top = (H - h) / 2;
     setRect(sp, left, top, w1, h);
     setRect(cam, left + w1, top, w2, h);
   }
+}
+
+// ---------- pane sizing ----------
+// The page splits by orientation, not width: landscape puts the video pane
+// beside the chat, portrait stacks it on top. The pane keeps a user-dragged
+// size per mode; while two videos play split and the user hasn't dragged for
+// that, it auto-fits so the pair covers as much of the screen as it can.
+const isLandscape = () => window.matchMedia('(orientation: landscape)').matches;
+const splitActive = () => $('#video-box').classList.contains('screen-split');
+const minPaneW = () => Math.max(200, window.innerWidth * 0.25);
+const minChatW = () => Math.min(380, Math.max(200, window.innerWidth * 0.3));
+// aspect of what the box is showing: the split pair (as one shape, in its
+// better arrangement), else the main picture — screen share, playing clip,
+// or your own preview
+function mainAspect() {
+  const box = $('#video-box');
+  const a1 = videoAspect(screenEl()), a2 = videoAspect(activeEl());
+  if (box.classList.contains('screen-split')) return null; // handled as a pair
+  if (box.classList.contains('mode-screen') && state.screenLayout !== 'cam') return a1;
+  if (box.classList.contains('mode-screenlive')) return a1;
+  if (box.classList.contains('mode-play')) return a2;
+  return videoAspect(preview);
+}
+let paneDragging = false;
+function applyPane() {
+  if (paneDragging) return;
+  const chatEl = $('#chat');
+  const box = $('#video-box');
+  const split = splitActive(), k = split ? '2' : '';
+  const saved = localStorage.getItem('splitty:split' + k), savedH = localStorage.getItem('splitty:stageh' + k);
+  if (saved) chatEl.style.setProperty('--split', saved); else chatEl.style.removeProperty('--split');
+  if (savedH) chatEl.style.setProperty('--stageh', savedH); else chatEl.style.removeProperty('--stageh');
+  if ($('#stage').classList.contains('hidden')) return;
+  const a1 = videoAspect(screenEl()), a2 = videoAspect(activeEl());
+  const single = mainAspect();
+  // area a W×H box would put to use
+  const area = (W, H) => split ? fitPair(W, H, a1, a2).area : Math.min(W, H * single) * Math.min(H, W / single);
+  if (isLandscape() && !saved) {
+    // pane width that lets the picture fill the box's height — for a pair,
+    // either way round; keep whichever covers more once clamped to the page
+    const H = box.clientHeight, pad = $('#stage').getBoundingClientRect().left + 32;
+    if (!H) return;
+    const lo = minPaneW(), hi = window.innerWidth - minChatW();
+    const ideal = split ? [H * (a1 + a2), H / (1 / a1 + 1 / a2)] : [H * single];
+    const cands = ideal.map(w => Math.min(Math.max(w + pad, lo), hi));
+    const best = cands.reduce((a, w) => area(w - pad, H) > area(a - pad, H) ? w : a);
+    chatEl.style.setProperty('--split', `${Math.round(best)}px`);
+  } else if (!isLandscape() && !savedH) {
+    const W = box.clientWidth;
+    if (!W) return;
+    const lo = 120, hi = window.innerHeight * 0.7;
+    const ideal = split ? [W / (a1 + a2), W * (1 / a1 + 1 / a2)] : [W / single];
+    const cands = ideal.map(h => Math.min(Math.max(h, lo), hi));
+    const best = cands.reduce((a, h) => area(W, h) > area(W, a) ? h : a);
+    chatEl.style.setProperty('--stageh', `${Math.round(best)}px`);
+  }
+}
+// forget a dragged size for the current mode — back to auto-fit
+function resetPane() {
+  const k = splitActive() ? '2' : '';
+  localStorage.removeItem('splitty:split' + k);
+  localStorage.removeItem('splitty:stageh' + k);
+  applyPane();
+  relayoutPips();
 }
 
 function setScreenLayout(layout) {
@@ -4090,6 +4252,7 @@ function updateStage() {
   const nocam = $('#nocam-btn');
   nocam.classList.toggle('hidden', mode === 'play' || screenLive || !camStream);
   nocam.textContent = state.voiceOnly ? 'Camera' : 'No camera';
+  applyPane(); // pane size follows the picture (auto-fitted unless dragged for this mode)
   if (split) layoutSplit(); // computed rects: aspect-true, sandwiched, centered
   // the visualizer stands in for a picture: your mic while idle/recording
   // voice-only, the clip's audio while an audio message plays

@@ -105,7 +105,7 @@ body {
 .empty { color: var(--muted); text-align: center; margin-top: 15vh; }
 
 /* ---------- stage (video + transport) ---------- */
-/* portrait / narrow: full-width video on top (drag the bar below to resize),
+/* portrait: full-width video on top (drag the bar below to resize),
    full-width track under it, chat below */
 #stage {
   display: flex; flex-direction: column; gap: 10px;
@@ -154,10 +154,11 @@ body {
   cursor: row-resize; background: #181a21; touch-action: none;
 }
 #splitter:hover, #splitter:active { background: var(--accent); }
+#splitter { -webkit-user-select: none; user-select: none; } /* double-click resets to auto-fit; don't select text */
 #stage.hidden ~ #splitter { display: none; }
 #pip-label {
   position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 8px; z-index: 2;
-  font-size: 11px; color: #fff; background: linear-gradient(transparent, rgba(0,0,0,0.7));
+  font-size: 11px; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.6);
 }
 
 #transport { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -198,16 +199,18 @@ body {
 .t-play { font-size: 15px; min-width: 44px; }
 #time-label { margin-left: auto; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
-/* wide / landscape: split screen — video pane left, conversation right,
-   divider draggable (--split set from JS) */
-@media (min-width: 880px) {
-  #chat { display: grid; grid-template-columns: minmax(280px, var(--split, 42%)) 6px 1fr; grid-template-rows: auto 1fr auto; }
+/* landscape (any width — a phone on its side too): video pane left,
+   conversation right, divider draggable (--split set from JS; auto-fitted
+   to the two-video pair while a split screen share plays) */
+@media (orientation: landscape) {
+  #chat { display: grid; grid-template-columns: minmax(200px, var(--split, 42%)) 6px 1fr; grid-template-rows: auto 1fr auto; }
   #chat-header { grid-column: 1 / -1; }
   #stage {
     grid-column: 1; grid-row: 2 / 4; min-height: 0;
     flex-direction: column; align-items: stretch;
     padding: 16px; border-bottom: 0;
   }
+  @media (max-height: 500px) { #stage { padding: 8px; } #transport { margin-top: 6px; } }
   /* video fills the whole pane */
   #video-box { width: 100%; height: auto; margin: 0; flex: 1; min-height: 0; }
   #transport { flex: 0 0 auto; margin-top: 12px; }
@@ -741,7 +744,7 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 .word, .gap { touch-action: pan-y; }
 #video-box, .dual, #scrubber { touch-action: none; }
 
-/* mobile: tighter cards (nesting shrinks slower), controls hug the corner */
+/* small screens (either orientation): tighter cards, controls hug the corner */
 @media (max-width: 879px) {
   #messages { padding: 12px 8px 130px; }
   .msg { padding: 9px 8px 9px 10px; margin-bottom: 10px; }
@@ -753,3 +756,36 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 
 /* the record cluster is draggable */
 #controls { touch-action: none; cursor: grab; }
+
+/* ---------- first-visit tour ---------- */
+/* the spot's giant shadow is the dim — so the target shows through at full
+   brightness with an accent ring; the card floats next to it */
+#tour-gate { position: fixed; inset: 0; z-index: 110; }
+#tour-spot {
+  position: absolute; border-radius: 14px; pointer-events: none;
+  box-shadow: 0 0 0 9999px rgba(10, 11, 15, 0.6), 0 0 0 3px var(--accent), 0 0 24px 4px rgba(124, 92, 255, 0.55);
+  transition: left 0.25s, top 0.25s, width 0.25s, height 0.25s;
+}
+#tour-spot.none { box-shadow: 0 0 0 9999px rgba(10, 11, 15, 0.6); width: 0; height: 0; }
+#tour-card {
+  position: absolute; background: var(--panel); border-radius: 18px; padding: 24px 22px 18px;
+  width: min(380px, calc(100vw - 24px)); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+  text-align: center; animation: tour-in 0.25s ease-out;
+}
+@keyframes tour-in { from { opacity: 0; transform: translateY(8px); } }
+#tour-skip { position: absolute; top: 10px; right: 10px; font-size: 13px; }
+#tour-icon {
+  width: 52px; height: 52px; border-radius: 50%; margin: 0 auto 14px;
+  background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center;
+}
+#tour-icon .ic { width: 24px; height: 24px; fill: currentColor; }
+#tour-icon .rec-dot { width: 20px; height: 20px; border-radius: 50%; background: var(--rec); display: block; }
+#tour-card h2 { margin-bottom: 8px; font-size: 19px; }
+#tour-card p { color: var(--muted); font-size: 14px; line-height: 1.5; margin-bottom: 18px; }
+#tour-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+#tour-back { font-size: 13px; }
+#tour-back.hidden { display: block; visibility: hidden; } /* keep the row balanced on the first card */
+#tour-dots { display: flex; gap: 6px; }
+#tour-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--panel-2); border: 1px solid #2e3342; }
+#tour-dots i.on { background: var(--accent); border-color: var(--accent); }
+#tour-next { min-width: 84px; }
