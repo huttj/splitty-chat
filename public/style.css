@@ -122,7 +122,7 @@ body {
 #video-box.mode-play #preview,
 #video-box.mode-screenlive #preview {
   inset: 8px 8px auto auto; width: 22%; height: auto; /* JS refines to the camera's real aspect */
-  border-radius: 10px; border: 1px solid rgba(255,255,255,0.3); z-index: 3;
+  border-radius: 12px; border: 1px solid rgba(255,255,255,0.3); z-index: 3;
   box-shadow: 0 4px 14px rgba(0,0,0,0.5); cursor: grab;
   touch-action: none;
 }
@@ -526,7 +526,7 @@ body.role-viewer #splitter { bottom: 0; }
 /* the little draggable video during screen playback (tap = swap big/small) */
 #video-box.mode-screen .spip {
   inset: auto; /* geometry comes inline from layoutPip — box matches the video's aspect */
-  border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.3); z-index: 5;
+  border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.3); z-index: 5;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5); cursor: grab; object-fit: cover;
   touch-action: none;
 }

@@ -3659,7 +3659,7 @@ function layoutPip(el, conf) {
 }
 
 function clearPip(el) {
-  for (const p of ['position', 'inset', 'left', 'top', 'width', 'height', 'z-index', 'cursor']) {
+  for (const p of ['position', 'inset', 'left', 'top', 'width', 'height', 'z-index', 'cursor', 'border-radius']) {
     el.style.removeProperty(p);
   }
 }
@@ -3686,6 +3686,7 @@ function relayoutPips() {
   const box = $('#video-box');
   applyPane();
   if (box.classList.contains('screen-split')) layoutSplit();
+  else layoutContained();
   if (box.classList.contains('mode-play') || box.classList.contains('mode-screenlive')) {
     layoutPip(preview, pips.cam);
   }
@@ -3717,16 +3718,40 @@ function layoutSplit() {
     position: 'absolute', inset: 'auto',
     left: `${l}px`, top: `${t}px`, width: `${w}px`, height: `${h}px`,
   });
+  const R = '12px';
   if (fit.stack) {
     const w = fit.w, h1 = w / a1, h2 = w / a2;
     const left = (W - w) / 2, top = (H - (h1 + h2)) / 2;
     setRect(sp, left, top, w, h1);
     setRect(cam, left, top + h1, w, h2);
+    sp.style.borderRadius = `${R} ${R} 0 0`; cam.style.borderRadius = `0 0 ${R} ${R}`;
   } else {
     const h = fit.h, w1 = h * a1, w2 = h * a2;
     const left = (W - (w1 + w2)) / 2, top = (H - h) / 2;
     setRect(sp, left, top, w1, h);
     setRect(cam, left + w1, top, w2, h);
+    sp.style.borderRadius = `${R} 0 0 ${R}`; cam.style.borderRadius = `0 ${R} ${R} 0`;
+  }
+}
+
+// A letterboxed picture (Fit mode, or a screen share) painted by object-fit
+// has square corners inside the rounded box. Size the element to the picture
+// instead, so the box's rounding applies to the picture itself.
+function layoutContained() {
+  const box = $('#video-box');
+  if (box.classList.contains('screen-split')) return;
+  const W = box.clientWidth, H = box.clientHeight;
+  if (!W || !H) return;
+  const contain = box.classList.contains('fit-contain');
+  for (const el of [...players, screenEl(), preview]) {
+    if (el.classList.contains('hidden') || isPipNow(el) || !contain) continue;
+    if (!el.videoWidth) continue; // aspect unknown yet — leave it filling the box
+    const a = videoAspect(el);
+    const w = Math.min(W, H * a), h = w / a;
+    Object.assign(el.style, {
+      position: 'absolute', inset: 'auto', borderRadius: '12px',
+      left: `${(W - w) / 2}px`, top: `${(H - h) / 2}px`, width: `${w}px`, height: `${h}px`,
+    });
   }
 }
 
@@ -4254,6 +4279,7 @@ function updateStage() {
   nocam.textContent = state.voiceOnly ? 'Camera' : 'No camera';
   applyPane(); // pane size follows the picture (auto-fitted unless dragged for this mode)
   if (split) layoutSplit(); // computed rects: aspect-true, sandwiched, centered
+  else layoutContained(); // letterboxed pictures get the box's rounding
   // the visualizer stands in for a picture: your mic while idle/recording
   // voice-only, the clip's audio while an audio message plays
   const vizLive = mode !== 'play' && !!camStream && !hasCam && !screenLive;
