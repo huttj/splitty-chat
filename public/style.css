@@ -789,3 +789,27 @@ button, select, .gap, .fold-chip, .msg-head, #lens-meta, #depth-row,
 #tour-dots i { width: 7px; height: 7px; border-radius: 50%; background: var(--panel-2); border: 1px solid #2e3342; }
 #tour-dots i.on { background: var(--accent); border-color: var(--accent); }
 #tour-next { min-width: 84px; }
+
+/* ---------- embed mode (/embed/:id — read-only inside a third-party iframe) ----------
+   No chrome, no record/menu affordances; the document grows with its content
+   (stage + a capped transcript pane) so the host's embed.js can size the frame. */
+html.embed, html.embed body { height: auto; overflow: auto; overscroll-behavior: auto; }
+body.embed #chat { display: flex; flex-direction: column; height: auto; min-height: 240px; }
+body.embed #chat-header, body.embed #controls, body.embed #rec-btn, body.embed #rec-hint,
+body.embed #menu-pop, body.embed #layer-pop, body.embed #name-gate, body.embed #push-banner,
+body.embed #share-gate, body.embed #tour-gate, body.embed #history-bar, body.embed #splitter,
+body.embed #cam-enable, body.embed #self-btn, body.embed #nocam-btn, body.embed #preview { display: none !important; }
+body.embed #stage { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: 12px 12px 10px; }
+body.embed #video-box { width: 100%; height: auto; flex: none; aspect-ratio: 16 / 9; max-height: 420px; }
+body.embed #messages {
+  flex: none; max-height: 480px; overflow-y: auto; overscroll-behavior: contain;
+  padding: 12px 12px 56px; /* room for the open-in link */
+}
+body.embed #toast { bottom: 16px; }
+#embed-open {
+  position: fixed; right: 12px; bottom: 12px; z-index: 80;
+  font-size: 12px; font-weight: 600; color: var(--text); text-decoration: none;
+  background: var(--panel-2); border: 1px solid #2e3342; border-radius: 99px; padding: 6px 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.45); opacity: 0.85;
+}
+#embed-open:hover { opacity: 1; border-color: var(--accent); }
