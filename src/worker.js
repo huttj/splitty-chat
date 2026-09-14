@@ -1020,6 +1020,26 @@ export default {
         }
       }
 
+      // ---- embed: /embed/:id serves the SPA shell in a frameable, read-only
+      // mode. Only publicly viewable chats qualify; anything else is a flat
+      // 404 so the existence of a private chat never leaks. ----
+      if ((m = pathname.match(/^\/embed\/([A-Za-z0-9_-]+)$/)) && request.method === 'GET') {
+        const chat = await env.DB.prepare('SELECT * FROM chats WHERE id = ?').bind(m[1]).first();
+        const access = chat ? await chatAccess(env, null, chat) : null; // anonymous: iframes carry no session
+        if (!access?.role) {
+          return new Response('<!doctype html><title>Not embeddable</title><p>Not embeddable</p>', {
+            status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' },
+          });
+        }
+        let page = await env.ASSETS.fetch(new URL('/index.html', url));
+        if (page.status >= 300 && page.status < 400) page = await env.ASSETS.fetch(new URL('/', url)); // asset html_handling may redirect /index.html -> /
+        const headers = new Headers(page.headers);
+        headers.delete('X-Frame-Options');
+        headers.set('Content-Security-Policy', 'frame-ancestors *');
+        headers.set('Cache-Control', 'no-store'); // visibility can flip; never cache a frameable shell
+        return new Response(page.body, { status: page.status, headers });
+      }
+
       if ((m = pathname.match(/^\/media\/([A-Za-z0-9_.-]+)$/)) && (request.method === 'GET' || request.method === 'HEAD')) {
         return await serveMedia(request, env, m[1]);
       }

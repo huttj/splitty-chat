@@ -2,6 +2,12 @@
 
 const $ = s => document.querySelector(s);
 
+// embed mode: /embed/:id renders a public chat read-only inside a third-party
+// iframe — no chrome, no recording, no gates, no session (cookies are
+// SameSite=Lax, so the frame is always anonymous)
+const embedMatch = location.pathname.match(/^\/embed\/([A-Za-z0-9_-]+)/);
+const EMBED = !!embedMatch;
+
 const state = {
   chatId: null,
   name: localStorage.getItem('splitty:name') || '',
@@ -82,13 +88,13 @@ let lastPipSwap = 0; // suppress the click that trails a PiP swap tap
 const ROLE_RANK = { viewer: 1, commenter: 2, editor: 3 };
 // can this person record into the base conversation? (name-only mode stays open)
 const canComment = () =>
-  !state.auth?.authEnabled || (ROLE_RANK[state.myRole] || 0) >= ROLE_RANK.commenter;
-const canEdit = () => !!state.auth?.authEnabled && state.myRole === 'editor';
+  !EMBED && (!state.auth?.authEnabled || (ROLE_RANK[state.myRole] || 0) >= ROLE_RANK.commenter);
+const canEdit = () => !EMBED && !!state.auth?.authEnabled && state.myRole === 'editor';
 // ...and can they record at all, counting comment layers? Signed-out
 // visitors on a comment-enabled chat count too: they see the record button
 // and get the camera prompt — tapping record is what asks them to sign in.
 const canRecordHere = () =>
-  canComment() || !!(state.chatMeta?.comments && state.myRole);
+  !EMBED && (canComment() || !!(state.chatMeta?.comments && state.myRole));
 
 // name comparison is forgiving about case/whitespace so "Josh " on your phone
 // still owns what "josh" recorded on your laptop
@@ -139,7 +145,13 @@ fetch('/api/me')
       state.name = me.user.name;
       localStorage.setItem('splitty:name', me.user.name);
     }
-    if (chatMatch) {
+    if (embedMatch) {
+      document.documentElement.classList.add('embed');
+      document.body.classList.add('embed');
+      state.chatId = embedMatch[1];
+      initChat();
+      initEmbed();
+    } else if (chatMatch) {
       state.chatId = chatMatch[1];
       initChat();
     } else if (inviteMatch) {
@@ -155,13 +167,13 @@ fetch('/api/me')
 // Quietly pull videos into the browser HTTP cache (media responses are
 // immutable) so tapping any unheard message starts instantly. One download at
 // a time, capped budget, skips Save-Data connections and hidden tabs.
-const prefetch = { done: new Set(), queue: [], running: false, bytes: 0, BUDGET: 80 * 1024 * 1024 };
+const prefetch = { done: new Set(), queue: [], running: false, bytes: 0, BUDGET: (EMBED ? 8 : 80) * 1024 * 1024 }; // embeds sit in someone else's page — stay light
 
 // In-memory blob store: mobile Chrome downgrades video preload to save data,
 // so feed the <video> elements blob: URLs — playback and seeks are fully local.
 const blobStore = new Map(); // file -> { url, size, last }
 let blobTick = 0, blobBytes = 0;
-const BLOB_BUDGET = 48 * 1024 * 1024;
+const BLOB_BUDGET = (EMBED ? 8 : 48) * 1024 * 1024;
 
 function storeBlob(file, blob) {
   if (blobStore.has(file) || blob.size > 20 * 1024 * 1024) return;
@@ -385,6 +397,7 @@ const camHasVideo = () => !!camStream?.getVideoTracks().some(t => t.readyState =
 
 let camPending = null; // in-flight getUserMedia — callers share it
 async function ensureCam() {
+  if (EMBED) throw new Error('no camera in embed mode');
   if (camStream && camStream.active) return camStream;
   if (camPending) return camPending;
   // saved device choices ride along as 'ideal' — a missing device (unplugged
@@ -682,6 +695,7 @@ function initMenu() {
 // Safari only grants the camera from a real tap — retry on the first gesture,
 // and keep an explicit button as the reliable path
 function armCamRetry() {
+  if (EMBED) return;
   const retry = () =>
     ensureCam().catch(err => {
       if (err.name === 'NotAllowedError') {
@@ -972,6 +986,7 @@ function placeTour() {
 window.addEventListener('resize', placeTour);
 // first time somewhere you can record (after the name gate, if it had to open)
 function maybeTour() {
+  if (EMBED) return;
   if (localStorage.getItem('splitty:tour')) return;
   if (!$('#name-gate').classList.contains('hidden')) return;
   setTimeout(showTour, 400); // let the stage settle so the spotlight lands on the real layout
@@ -980,7 +995,7 @@ function maybeTour() {
 // ---------- chat ----------
 function initChat() {
   state.seen = JSON.parse(localStorage.getItem(`splitty:seen:${state.chatId}`) || '{}');
-  state.inviteToken = new URLSearchParams(location.search).get('invite');
+  state.inviteToken = EMBED ? null : new URLSearchParams(location.search).get('invite'); // embeds never carry credentials
   $('#chat').classList.remove('hidden');
   // share opens the panel whenever auth exists (legacy chats get the setup
   // pitch inside); name-only mode just copies the link
@@ -992,10 +1007,10 @@ function initChat() {
   $('#share-gate').addEventListener('click', e => {
     if (e.target === $('#share-gate')) $('#share-gate').classList.add('hidden');
   });
-  initPush();
+  if (!EMBED) initPush(); // no service worker / push inside a third-party frame
   initMenu();
   initTimeline();
-  restorePendingUploads();
+  if (!EMBED) restorePendingUploads();
   $('#cam-btn').onclick = toggleVoiceOnly;
   $('#nocam-btn').onclick = toggleVoiceOnly;
   paintCamBtn();
@@ -1450,6 +1465,7 @@ function initChat() {
     if (e.target === $('#name-gate') && state.name && !gateAuthMode) $('#name-gate').classList.add('hidden');
   });
   const openNameGate = () => {
+    if (EMBED) return; // read-only: nobody is asked who they are
     $('#name-input').value = state.name;
     $('#name-gate').classList.remove('hidden');
     if (!gateAuthMode) $('#name-input').focus();
@@ -1470,7 +1486,7 @@ function initChat() {
     $('#name-btn').onclick = openNameGate;
   }
   state.openNameGate = openNameGate;
-  if (!state.auth?.authEnabled) {
+  if (!EMBED && !state.auth?.authEnabled) {
     // name-only mode: gate on a name, then warm the camera
     if (!state.name) openNameGate();
     else ensureCam().catch(armCamRetry);
@@ -1480,10 +1496,12 @@ function initChat() {
   // asked for a camera, and locked chats show the request-access screen instead
 
   // remember this chat on the landing page
-  const recent = JSON.parse(localStorage.getItem('splitty:recent') || '[]')
-    .filter(r => r.id !== state.chatId);
-  recent.unshift({ id: state.chatId, ts: Date.now() });
-  localStorage.setItem('splitty:recent', JSON.stringify(recent.slice(0, 20)));
+  if (!EMBED) {
+    const recent = JSON.parse(localStorage.getItem('splitty:recent') || '[]')
+      .filter(r => r.id !== state.chatId);
+    recent.unshift({ id: state.chatId, ts: Date.now() });
+    localStorage.setItem('splitty:recent', JSON.stringify(recent.slice(0, 20)));
+  }
 
   poll();
   setInterval(poll, 2500);
@@ -1532,6 +1550,10 @@ async function poll() {
 // ---------- access states ----------
 function showLocked(err, status) {
   if (state.playing) stopPlayback(); // access can vanish mid-watch (kicked, made private)
+  if (EMBED) { // flipped private after the frame loaded — no sign-in path from inside an embed
+    $('#messages').innerHTML = '<div class="empty">This chat is no longer public.</div>';
+    return;
+  }
   $('#chat').classList.add('hidden');
   $('#locked').classList.remove('hidden');
   const signedOut = status === 401 || err.code === 'auth';
@@ -1562,6 +1584,7 @@ function hideLocked() {
 
 // role is known (or changed — e.g. you just got approved or promoted)
 function setRole(role) {
+  if (EMBED && role) role = 'viewer'; // embeds are watch-only whatever the server says
   const changed = state.myRole !== role;
   state.myRole = role;
   document.body.classList.toggle('role-viewer', !canRecordHere());
@@ -5248,6 +5271,36 @@ async function initInvite(token) {
       else showToast(data.error || "Couldn't join this chat");
     };
   }
+}
+
+// ---------- embed mode ----------
+// Read-only frame: an "Open in Splitty" escape hatch, plus height reports so
+// the host page's loader (embed.js) can size the iframe to the content.
+function initEmbed() {
+  const open = document.createElement('a');
+  open.id = 'embed-open';
+  open.href = `https://splitty.chat/c/${encodeURIComponent(state.chatId)}`;
+  open.target = '_blank';
+  open.rel = 'noopener';
+  open.textContent = 'Open in Splitty \u2197';
+  document.body.appendChild(open);
+
+  let lastH = 0;
+  const postHeight = () => {
+    const height = document.documentElement.scrollHeight;
+    if (height === lastH) return;
+    lastH = height;
+    try {
+      parent.postMessage({ type: 'splitty:height', id: state.chatId, height }, '*');
+    } catch { /* no parent, or a host that refuses messages */ }
+  };
+  if (document.readyState === 'complete') postHeight();
+  else window.addEventListener('load', postHeight);
+  if ('ResizeObserver' in window) {
+    const ro = new ResizeObserver(postHeight);
+    for (const sel of ['#messages', '#stage', '#chat']) { const el = $(sel); if (el) ro.observe(el); }
+  }
+  window.addEventListener('resize', postHeight);
 }
 
 // ---------- push notifications ----------
